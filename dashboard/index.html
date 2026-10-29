@@ -1,0 +1,729 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FocusDesk Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Serif:ital@0;1&display=swap">
+<!-- MQTT.js: client MQTT di browser lewat WebSocket (wss://) -->
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.16.1/dist/mqtt.min.js"></script>
+<style>
+  /* Layout: bento grid of frosted-glass widgets on a dark dot-grid canvas.
+     The page glows in the colour of the current status. Deliberately dark-only. */
+  :root {
+    color-scheme: dark;
+    --bg: #070a12;
+    --glass: rgba(255, 255, 255, 0.045);
+    --glass-strong: rgba(255, 255, 255, 0.075);
+    --edge: rgba(255, 255, 255, 0.09);
+    --text: #eef2f6; --muted: #93a1b0; --faint: #5d6a78;
+    --ok: #3ee08f; --bad: #ff5468; --warn: #ffc247; --info: #5cc8f2; --off: #8a96a3;
+    --state: var(--off);
+    --font: "Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
+    --serif: "Instrument Serif", Georgia, serif;
+  }
+  body[data-state="ok"] { --state: var(--ok); }
+  body[data-state="bad"] { --state: var(--bad); }
+  body[data-state="warn"] { --state: var(--warn); }
+  body[data-state="info"] { --state: var(--info); }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body { margin: 0; min-height: 100vh; color: var(--text); font: 15px/1.5 var(--font); background: var(--bg); position: relative; overflow-x: hidden; }
+  /* glow + dot grid backdrop */
+  body::before { content: ""; position: fixed; inset: -20%; z-index: 0; pointer-events: none;
+    background:
+      radial-gradient(40% 35% at 22% 18%, color-mix(in srgb, var(--state) 26%, transparent), transparent 70%),
+      radial-gradient(35% 30% at 85% 85%, color-mix(in srgb, var(--state) 14%, transparent), transparent 70%);
+    transition: background .6s; }
+  body::after { content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background-image: radial-gradient(rgba(255,255,255,0.07) 1px, transparent 1px); background-size: 22px 22px;
+    mask-image: linear-gradient(to bottom, black, transparent 85%); }
+  main { position: relative; z-index: 1; max-width: 1240px; margin: 0 auto; padding: 18px 16px 48px; display: grid; gap: 14px; }
+  h1, h2, h3, p { margin: 0; }
+
+  .micro { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .glass { background: var(--glass); border: 1px solid var(--edge); border-radius: 22px; padding: 18px 20px;
+           backdrop-filter: blur(18px) saturate(140%); -webkit-backdrop-filter: blur(18px) saturate(140%);
+           box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 20px 40px -24px rgba(0,0,0,0.8); position: relative; }
+  .corner { position: absolute; top: 14px; right: 18px; }
+
+  /* top bar */
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 4px 4px 0; }
+  .brand { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .brand h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
+  .brand h1 em { font-family: var(--serif); font-weight: 400; font-size: 26px; color: var(--state); transition: color .4s; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+          background: var(--glass); border: 1px solid var(--edge); font: 500 12px var(--mono); color: var(--muted); white-space: nowrap; }
+  .chip b { color: var(--text); font-weight: 700; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font: 700 12px var(--mono);
+          letter-spacing: .04em; border: 1px solid currentColor; white-space: nowrap; }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); } .info { color: var(--info); } .off { color: var(--off); }
+  #clock { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+
+  /* bento grid */
+  .bento { display: grid; gap: 14px; grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .w-timer { grid-column: span 5; grid-row: span 2; }
+  .w-status { grid-column: span 7; }
+  .w-score { grid-column: span 3; }
+  .w-small { grid-column: span 2; }
+  .w-half { grid-column: span 6; }
+  .w-chart { grid-column: span 8; }
+  .w-alerts { grid-column: span 4; }
+  @media (max-width: 980px) {
+    .w-timer, .w-status, .w-half, .w-chart, .w-alerts { grid-column: span 12; }
+    .w-score { grid-column: span 6; } .w-small { grid-column: span 3; }
+  }
+  @media (max-width: 560px) { .w-score, .w-small { grid-column: span 12; } }
+
+  /* timer widget */
+  .w-timer { display: grid; justify-items: center; align-content: space-between; gap: 14px; text-align: center; padding-top: 22px; }
+  .hud { position: relative; width: min(300px, 78vw); aspect-ratio: 1; }
+  .hud svg { width: 100%; height: 100%; display: block; }
+  .hud .tick { stroke: rgba(255,255,255,0.14); stroke-width: 2; stroke-linecap: round; transition: stroke .4s; }
+  .hud .tick.major { stroke-width: 3; }
+  .hud .tick.lit { stroke: var(--state); }
+  .hud .arc-track { fill: none; stroke: rgba(255,255,255,0.06); stroke-width: 6; }
+  .hud .arc { fill: none; stroke: var(--state); stroke-width: 6; stroke-linecap: round; transition: stroke-dashoffset .9s linear, stroke .4s;
+              filter: drop-shadow(0 0 8px var(--state)); }
+  .hud-center { position: absolute; inset: 0; display: grid; place-content: center; gap: 4px; }
+  #timer { font-family: var(--mono); font-size: clamp(40px, 6vw, 58px); font-weight: 700; letter-spacing: -0.03em; line-height: 1; }
+  #phase { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .hud-labels { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .pomo { display: flex; gap: 7px; align-items: center; }
+  .pomo i { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,0.28); transition: background .3s, border-color .3s; }
+  .pomo i.done { background: var(--ok); border-color: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .pomo i.now { border-color: var(--state); box-shadow: 0 0 0 0 var(--state); animation: ring-pulse 1.6s ease-out infinite; }
+  @keyframes ring-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--state) 70%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
+  .controls { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  button { font: 700 13px var(--font); letter-spacing: .02em; padding: 11px 20px; border-radius: 999px; border: 1px solid var(--edge);
+           background: var(--glass-strong); color: var(--text); cursor: pointer; transition: transform .08s, background .2s, box-shadow .2s; }
+  button:hover:not(:disabled) { background: rgba(255,255,255,0.12); }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--info); outline-offset: 3px; }
+  button.primary { background: var(--text); color: #0b0f17; border-color: var(--text); min-width: 116px; }
+  button.primary:hover:not(:disabled) { background: #ffffff; box-shadow: 0 0 24px rgba(255,255,255,0.25); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* status widget */
+  .w-status { display: grid; align-content: space-between; gap: 14px; min-height: 190px; overflow: hidden; }
+  .w-status::after { content: ""; position: absolute; right: -60px; top: -60px; width: 220px; height: 220px; border-radius: 50%;
+                     background: radial-gradient(circle, color-mix(in srgb, var(--state) 40%, transparent), transparent 70%); transition: background .5s; pointer-events: none; }
+  #status-text { font-size: clamp(36px, 4.6vw, 56px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.02; }
+  #status-text em { font-family: var(--serif); font-weight: 400; font-size: 1.12em; letter-spacing: -0.01em; color: var(--state); transition: color .4s; }
+  #status-reason { color: var(--muted); font-size: 15px; max-width: 52ch; }
+  body[data-state="bad"] .w-status { animation: alarm 1.2s ease-in-out infinite; }
+  @keyframes alarm { 50% { box-shadow: inset 0 0 0 1px var(--bad), 0 0 40px -6px var(--bad); } }
+
+  /* small widgets */
+  .stat { display: grid; align-content: space-between; gap: 10px; min-height: 140px; }
+  .stat-value { font-family: var(--mono); font-size: clamp(28px, 3vw, 38px); font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
+  .stat-value small { font-size: 0.45em; color: var(--muted); font-weight: 500; margin-left: 4px; }
+  .w-score { display: flex; align-items: center; gap: 16px; min-height: 140px; }
+  .mini-ring { width: 96px; height: 96px; flex: none; position: relative; }
+  .mini-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .mini-ring circle { fill: none; stroke-width: 9; }
+  .mini-ring .bg { stroke: rgba(255,255,255,0.08); }
+  .mini-ring .fg { stroke: var(--ok); stroke-linecap: round; transition: stroke-dashoffset .6s, stroke .3s; filter: drop-shadow(0 0 6px currentColor); }
+  .mini-ring span { position: absolute; inset: 0; display: grid; place-content: center; font: 700 26px var(--mono); }
+  .score-text { display: grid; gap: 6px; min-width: 0; }
+
+  /* device widgets */
+  .device { display: grid; gap: 16px; align-content: start; }
+  .device-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+  .device-head h2 { font-size: 18px; font-weight: 800; letter-spacing: -0.01em; }
+  .device-body { display: grid; grid-template-columns: auto 1fr; gap: 18px; align-items: center; }
+  .big { font-family: var(--mono); font-size: 40px; font-weight: 700; letter-spacing: -0.03em; line-height: 1; }
+  .big small { font-size: 15px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+  .scale { position: relative; height: 26px; }
+  .scale-ticks { position: absolute; inset: 0; display: flex; justify-content: space-between; align-items: end; }
+  .scale-ticks i { width: 2px; height: 10px; background: rgba(255,255,255,0.12); border-radius: 1px; }
+  .scale-ticks i:nth-child(5n+1) { height: 16px; }
+  .scale-ticks i.lit { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .scale-ticks i.lit.low { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  .scale-mark { position: absolute; top: -4px; bottom: -2px; width: 2px; background: var(--text); }
+  .scale-mark::after { content: attr(data-label); position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+                       font: 500 10px var(--mono); color: var(--muted); white-space: nowrap; }
+  .scale-legend { display: flex; justify-content: space-between; font: 500 11px var(--mono); color: var(--faint); margin-top: 4px; }
+  .panel { background: rgba(0,0,0,0.22); border: 1px solid var(--edge); border-radius: 16px; padding: 12px 14px; display: grid; gap: 10px; }
+  .panel-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .activity-label { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--off); flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: pulse 1.4s ease-out infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 70%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
+  .spark { display: flex; align-items: end; gap: 3px; height: 46px; position: relative; }
+  .spark i { flex: 1; min-width: 2px; background: rgba(255,255,255,0.14); border-radius: 2px 2px 0 0; height: 2px; transition: height .3s; }
+  .spark i.hit { background: var(--ok); box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 60%, transparent); }
+  .spark-line { position: absolute; left: 0; right: 0; border-top: 1px dashed rgba(255,255,255,0.35); }
+  .phone-icon { width: 46px; height: 80px; border-radius: 11px; border: 2px solid var(--off); position: relative; flex: none;
+                transition: transform .5s cubic-bezier(.3,1.4,.5,1), border-color .3s, box-shadow .3s; }
+  .phone-icon::after { content: ""; position: absolute; left: 50%; top: 6px; width: 12px; height: 3px; border-radius: 2px; background: currentColor; color: var(--off); transform: translateX(-50%); }
+  .phone-icon.down { border-color: var(--ok); transform: rotate(180deg); box-shadow: 0 0 18px -4px var(--ok); }
+  .phone-icon.up { border-color: var(--bad); transform: rotate(-14deg) translateY(-4px); box-shadow: 0 0 22px -2px var(--bad); }
+  .meter { height: 8px; border-radius: 4px; background: rgba(255,255,255,0.08); overflow: hidden; }
+  .meter > div { height: 100%; width: 0; border-radius: 4px; background: var(--ok); transition: width .5s, background .3s; }
+  .kv { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--muted); }
+  .kv b { font-family: var(--mono); color: var(--text); font-weight: 500; }
+
+  /* chart + alerts */
+  .w-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .w-head h2 { font-size: 16px; font-weight: 800; }
+  canvas { width: 100%; height: 230px; display: block; }
+  #alerts { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-height: 250px; overflow-y: auto; }
+  #alerts li { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; padding: 10px 12px; border-radius: 14px;
+               background: rgba(0,0,0,0.22); border: 1px solid var(--edge); animation: slidein .35s ease-out; }
+  @keyframes slidein { from { transform: translateY(-6px); opacity: 0; } }
+  #alerts .who { font: 700 11px var(--mono); padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; align-self: start; }
+  #alerts .msg { font-size: 14px; }
+  #alerts .time { grid-column: 2; font: 500 11px var(--mono); color: var(--faint); }
+  #alerts .empty { display: block; background: none; border: none; color: var(--muted); font-size: 14px; padding: 2px 0; animation: none; }
+
+  /* settings */
+  details { padding: 14px 20px; }
+  details summary { cursor: pointer; font-weight: 700; }
+  details[open] summary { margin-bottom: 10px; }
+  form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; margin-top: 12px; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  input { font: 14px var(--font); padding: 10px 12px; border-radius: 12px; border: 1px solid var(--edge); background: rgba(0,0,0,0.3); color: var(--text); width: 100%; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .muted { color: var(--muted); font-size: 14px; }
+  code { font-family: var(--mono); font-size: 0.9em; }
+  #topics { font: 500 11px var(--mono); color: var(--faint); overflow-wrap: anywhere; margin-top: 10px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body data-state="off">
+<main>
+  <header>
+    <div class="brand">
+      <h1>Focus<em>Desk</em></h1>
+      <span class="chip">PROJECT <b id="project-label">—</b></span>
+      <span id="conn" class="pill off" role="status">Belum terhubung</span>
+    </div>
+    <span id="clock">--:--:--</span>
+  </header>
+
+  <section class="bento" aria-label="Dashboard FocusDesk">
+    <!-- timer -->
+    <div class="glass w-timer">
+      <div class="hud-labels"><span class="micro" id="cycle-label">Pomodoro —</span><span class="pomo" id="pomo-dots" aria-label="Pomodoro dalam satu set"></span></div>
+      <div class="hud">
+        <svg viewBox="0 0 300 300" aria-hidden="true">
+          <g id="ticks"></g>
+          <circle class="arc-track" cx="150" cy="150" r="112"></circle>
+          <circle class="arc" id="ring-progress" cx="150" cy="150" r="112" transform="rotate(-90 150 150)"></circle>
+        </svg>
+        <div class="hud-center">
+          <div id="timer">--:--</div>
+          <div id="phase">Tekan START</div>
+        </div>
+      </div>
+      <div class="hud-labels"><span class="micro" id="plan-label">Fokus — · Istirahat —</span><span class="micro" id="left-label">Sisa —</span></div>
+      <div class="controls">
+        <button class="primary" id="start-btn" type="button" disabled>START</button>
+        <button id="pause-btn" type="button" disabled>PAUSE</button>
+        <button class="danger" id="stop-btn" type="button" disabled>STOP</button>
+      </div>
+    </div>
+
+    <!-- status -->
+    <div class="glass w-status">
+      <span class="micro">Status sekarang</span>
+      <div>
+        <div id="status-text">Menunggu <em>detector</em></div>
+        <p id="status-reason">Menunggu pesan dari detector…</p>
+      </div>
+    </div>
+
+    <!-- score + small stats -->
+    <div class="glass w-score">
+      <div class="mini-ring">
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+          <circle class="bg" cx="50" cy="50" r="42"></circle>
+          <circle class="fg" id="score-ring" cx="50" cy="50" r="42"></circle>
+        </svg>
+        <span id="score">—</span>
+      </div>
+      <div class="score-text">
+        <span class="micro">Skor fokus</span>
+        <span class="muted">Rata-rata 60 detik. Rata-rata sesi <b class="num" id="sum-score">—</b></span>
+      </div>
+    </div>
+    <div class="glass w-small stat">
+      <span class="micro">Waktu fokus</span>
+      <span class="stat-value" id="sum-focus">—</span>
+      <span class="micro" id="sum-pomodoros">0 pomodoro</span>
+    </div>
+    <div class="glass w-small stat">
+      <span class="micro">HP diambil</span>
+      <span class="stat-value" id="sum-pickups">—</span>
+    </div>
+
+    <!-- HP A -->
+    <div class="glass w-half device">
+      <div class="device-head">
+        <div><span class="micro">Edge 01 · Android</span><h2>HP A · Meja</h2></div>
+        <span id="edge1-state" class="pill off">Belum ada data</span>
+      </div>
+      <div>
+        <div class="kv"><span class="micro">Cahaya</span><span id="lux-level" class="micro">—</span></div>
+        <div class="big" id="edge1-lux">—<small>lux</small></div>
+        <div class="scale" style="margin-top:14px">
+          <div class="scale-ticks" id="lux-ticks"></div>
+          <div class="scale-mark" id="lux-low-mark" data-label="batas"></div>
+        </div>
+        <div class="scale-legend"><span>1</span><span>10</span><span>100</span><span>1000+ lux</span></div>
+      </div>
+      <div class="panel">
+        <div class="panel-top">
+          <span class="activity-label"><span class="dot" id="desk-dot"></span><span id="edge1-active">Belum ada data</span></span>
+          <span class="micro" id="edge1-rms">rms —</span>
+        </div>
+        <div class="spark" id="desk-spark" aria-label="Riwayat getaran meja"><div class="spark-line" id="spark-line"></div></div>
+      </div>
+      <span class="micro" id="edge1-seen"> </span>
+    </div>
+
+    <!-- HP B -->
+    <div class="glass w-half device">
+      <div class="device-head">
+        <div><span class="micro">Edge 02 · iPhone</span><h2>HP B · Pribadi</h2></div>
+        <span id="edge2-state" class="pill off">Belum ada data</span>
+      </div>
+      <div class="device-body">
+        <div class="phone-icon" id="phone-icon"></div>
+        <div style="display:grid;gap:6px">
+          <span class="micro">Posisi</span>
+          <div class="big" id="edge2-face" style="font-size:28px">—</div>
+          <span class="muted" id="edge2-rms">gerakan —</span>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-top"><span class="micro">Dipegang dalam window</span><span class="num" id="edge2-held">—</span></div>
+        <div class="meter"><div id="held-bar"></div></div>
+        <div class="kv"><span>Total dipegang sesi ini</span><b id="sum-held">—</b></div>
+      </div>
+      <span class="micro" id="edge2-seen"> </span>
+    </div>
+
+    <!-- chart -->
+    <div class="glass w-chart">
+      <div class="w-head"><h2>Skor fokus selama sesi</h2><span class="micro">garis putus = batas 70</span></div>
+      <canvas id="chart" role="img" aria-label="Grafik skor fokus selama sesi"></canvas>
+    </div>
+
+    <!-- alerts -->
+    <div class="glass w-alerts">
+      <div class="w-head"><h2>Peringatan</h2><span class="micro" id="alert-count">0</span></div>
+      <ul id="alerts"><li class="empty">Belum ada peringatan.</li></ul>
+    </div>
+  </section>
+
+  <details class="glass" id="settings" open>
+    <summary>Koneksi broker (MQTT over WebSocket)</summary>
+    <p class="muted">Browser memakai <b>WebSocket over TLS</b>. Broker publik HiveMQ: <code>wss://broker.hivemq.com:8884/mqtt</code>,
+      username dan password dikosongkan. Password tidak disimpan.</p>
+    <form id="conn-form">
+      <label>WebSocket URL <input id="url" value="wss://broker.hivemq.com:8884/mqtt" required></label>
+      <label>PROJECT_ID (sama dengan .env) <input id="project" placeholder="focusdesk_kelompok07" required></label>
+      <label>Username <input id="username" autocomplete="username"></label>
+      <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+      <div class="row">
+        <button class="primary" id="connect-btn" type="submit">Hubungkan</button>
+        <button id="disconnect-btn" type="button" disabled>Putuskan</button>
+      </div>
+    </form>
+    <p id="topics"></p>
+  </details>
+</main>
+
+<script>
+"use strict";
+const GOOD_SCORE = 70;
+const MAX_POINTS = 600;    // status tiap 1 detik -> 10 menit terakhir
+const SPARK_BARS = 48;
+const LUX_TICKS = 41;
+const LUX_SCALE_MAX = 2000;
+const RING_R = 112, RING_LENGTH = 2 * Math.PI * RING_R;
+const MINI_LENGTH = 2 * Math.PI * 42;
+const STATUS = {
+  FOKUS: ["ok", "Kamu sedang", "fokus"], TERDISTRAKSI: ["bad", "Kamu", "terdistraksi"],
+  CAHAYA_KURANG: ["warn", "Cahaya", "kurang"], CAHAYA_SILAU: ["warn", "Cahaya", "terlalu silau"],
+  MELAMUN: ["warn", "Kamu sedang", "melamun"], ISTIRAHAT: ["info", "Waktunya", "istirahat"],
+  JEDA: ["off", "Sesi", "dijeda"], MENUNGGU: ["info", "Menunggu", "perangkat"],
+  IDLE: ["off", "Siap untuk", "mulai"], OFFLINE: ["off", "Detector", "offline"],
+};
+const PHASE_TEXT = { IDLE: "Tekan START", FOCUS: "Sesi fokus", BREAK: "Istirahat", PAUSED: "Dijeda" };
+const TARGET = { edge1: ["HP A", "info"], edge2: ["HP B", "warn"] };
+
+const $ = (id) => document.getElementById(id);
+let client = null;
+let base = "";
+let lastPhase = "IDLE";
+const scores = [];
+const deskHistory = [];
+const alerts = [];
+const seenAt = { edge1: null, edge2: null };
+
+// ---------- static HUD parts ----------
+(function buildHud() {
+  const ns = "http://www.w3.org/2000/svg";
+  const group = $("ticks");
+  for (let i = 0; i < 60; i++) {
+    const angle = (i / 60) * Math.PI * 2 - Math.PI / 2;
+    const major = i % 5 === 0;
+    const inner = major ? 126 : 130, outer = 140;
+    const line = document.createElementNS(ns, "line");
+    line.setAttribute("x1", 150 + inner * Math.cos(angle)); line.setAttribute("y1", 150 + inner * Math.sin(angle));
+    line.setAttribute("x2", 150 + outer * Math.cos(angle)); line.setAttribute("y2", 150 + outer * Math.sin(angle));
+    line.setAttribute("class", major ? "tick major" : "tick");
+    group.appendChild(line);
+  }
+  $("ring-progress").style.strokeDasharray = String(RING_LENGTH);
+  $("ring-progress").style.strokeDashoffset = String(RING_LENGTH);
+  $("score-ring").style.strokeDasharray = String(MINI_LENGTH);
+  $("score-ring").style.strokeDashoffset = String(MINI_LENGTH);
+  $("lux-ticks").replaceChildren(...Array.from({ length: LUX_TICKS }, () => document.createElement("i")));
+  for (let i = 0; i < SPARK_BARS; i++) $("desk-spark").appendChild(document.createElement("i"));
+})();
+
+function setPill(el, text, cls) { el.textContent = text; el.className = el.className.replace(/\b(ok|bad|warn|info|off)\b/g, "").trim() + " " + cls; }
+function fmt(n, digits = 3) { return typeof n === "number" && isFinite(n) ? n.toFixed(digits) : "—"; }
+function clock(ms) { return new Date(ms).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+function mmss(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+function cssVar(name) { return getComputedStyle(document.body).getPropertyValue(name).trim(); }
+
+// ---------- simpan pengaturan (tanpa password) ----------
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("focusdesk-dashboard") || "{}");
+    for (const key of ["url", "project", "username"]) if (saved[key]) $(key).value = saved[key];
+  } catch (e) { /* localStorage tidak tersedia: abaikan */ }
+}
+function saveSettings() {
+  try {
+    localStorage.setItem("focusdesk-dashboard", JSON.stringify({
+      url: $("url").value.trim(), project: $("project").value.trim(), username: $("username").value.trim(),
+    }));
+  } catch (e) { /* abaikan */ }
+}
+
+// ---------- MQTT ----------
+function connect(event) {
+  event.preventDefault();
+  const url = $("url").value.trim();
+  const project = $("project").value.trim();
+  if (!/^wss?:\/\//.test(url)) { setPill($("conn"), "URL harus diawali wss://", "bad"); return; }
+  if (!/^[A-Za-z0-9_-]+$/.test(project)) { setPill($("conn"), "PROJECT_ID tidak valid", "bad"); return; }
+  if (typeof mqtt === "undefined") { setPill($("conn"), "MQTT.js gagal dimuat", "bad"); return; }
+  saveSettings();
+  if (client) client.end(true);
+
+  base = `focusdesk/${project}`;
+  $("project-label").textContent = project;
+  $("topics").textContent = `SUB ${base}/status · ${base}/alerts/+   PUB ${base}/control`;
+  setPill($("conn"), "Menghubungkan", "info");
+
+  client = mqtt.connect(url, {
+    username: $("username").value.trim() || undefined,
+    password: $("password").value || undefined,
+    clientId: `${project}-dashboard-${Math.random().toString(16).slice(2, 10)}`,
+    protocolVersion: 4,
+    reconnectPeriod: 3000,
+    connectTimeout: 10000,
+  });
+
+  client.on("connect", () => {
+    setPill($("conn"), "Broker terhubung", "ok");
+    client.subscribe([`${base}/status`, `${base}/alerts/+`], { qos: 1 });
+    $("settings").open = false;
+    setButtons(true);
+  });
+  client.on("reconnect", () => setPill($("conn"), "Menyambung ulang", "warn"));
+  client.on("offline", () => { setPill($("conn"), "Terputus", "off"); setButtons(false); });
+  client.on("error", (err) => setPill($("conn"), `Error: ${err.message}`, "bad"));
+  client.on("message", onMessage);
+}
+
+function disconnect() {
+  if (client) client.end(true);
+  client = null;
+  setPill($("conn"), "Belum terhubung", "off");
+  setButtons(false);
+  $("settings").open = true;
+}
+
+function setButtons(connected) {
+  for (const id of ["disconnect-btn", "start-btn", "pause-btn", "stop-btn"]) $(id).disabled = !connected;
+}
+
+function sendControl(command) {
+  if (client && client.connected) client.publish(`${base}/control`, command, { qos: 1 });
+}
+
+function onMessage(topic, payload) {
+  let data;
+  try { data = JSON.parse(payload.toString()); } catch (e) { return; }
+  if (!data || typeof data !== "object") return;
+
+  if (topic === `${base}/status`) return renderStatus(data);
+  const match = topic.match(/\/alerts\/(edge1|edge2)$/);
+  if (match) addAlert(match[1], data);
+}
+
+// ---------- tampilan ----------
+function renderStatus(data) {
+  const status = String(data.status || "?");
+  const [cls, lead, word] = STATUS[status] || ["info", "Status", status.toLowerCase()];
+  document.body.dataset.state = cls;
+  $("status-text").replaceChildren(document.createTextNode(`${lead} `), Object.assign(document.createElement("em"), { textContent: word }));
+  $("status-reason").textContent = String(data.reason || "");
+
+  const phase = String(data.phase || "IDLE");
+  const config = data.config || {};
+  const left = Number(data.phase_left_s) || 0;
+  $("timer").textContent = phase === "IDLE" ? "--:--" : mmss(left);
+  const pomodoro = data.pomodoro || {};
+  const longBreak = phase === "BREAK" && Boolean(pomodoro.long_break);
+  $("phase").textContent = phase === "BREAK" ? (longBreak ? "Istirahat panjang" : "Istirahat singkat") : (PHASE_TEXT[phase] || phase);
+  if (status === "ISTIRAHAT" && longBreak) $("status-text").lastChild.textContent = "istirahat panjang";
+  renderPomodoros(phase, pomodoro);
+  $("plan-label").textContent = config.focus_minutes
+    ? `${config.focus_minutes}m fokus · ${config.break_minutes}m · ${config.long_break_minutes}m panjang`
+    : "Fokus — · Istirahat —";
+  $("left-label").textContent = phase === "IDLE" ? "Sisa —" : `Sisa ${Math.ceil(left / 60)}m`;
+  $("start-btn").textContent = phase === "PAUSED" ? "LANJUT" : "START";
+  renderRing(phase, left, config, longBreak);
+
+  const score = typeof data.focus_score === "number" ? data.focus_score : null;
+  $("score").textContent = score === null ? "—" : Math.round(score);
+  $("score-ring").style.strokeDashoffset = String(MINI_LENGTH * (1 - (score || 0) / 100));
+  $("score-ring").style.stroke = cssVar(score !== null && score < GOOD_SCORE ? "--warn" : "--ok");
+  if (lastPhase === "IDLE" && phase === "FOCUS") scores.length = 0;  // sesi baru
+  lastPhase = phase;
+  if (phase === "FOCUS" && score !== null) {
+    scores.push(score);
+    if (scores.length > MAX_POINTS) scores.shift();
+    drawChart();
+  }
+
+  renderDesk(data.desk, config);
+  renderPhone(data.phone);
+  renderSummary(data.session || {});
+}
+
+function renderPomodoros(phase, pomodoro) {
+  // Satu set = 4 pomodoro; setelah set penuh ada istirahat panjang.
+  const perSet = Number(pomodoro.per_set) || 4;
+  const inSet = Number(pomodoro.in_set) || 0;
+  const completed = Number(pomodoro.completed) || 0;
+  const done = phase === "IDLE" ? 0 : pomodoro.long_break ? perSet : completed % perSet;
+  const dots = $("pomo-dots");
+  if (dots.children.length !== perSet) {
+    dots.replaceChildren(...Array.from({ length: perSet }, () => document.createElement("i")));
+  }
+  [...dots.children].forEach((dot, i) => {
+    dot.classList.toggle("done", i < done);
+    dot.classList.toggle("now", phase === "FOCUS" && i === inSet - 1);
+  });
+  $("cycle-label").textContent = phase === "IDLE" || !inSet ? `Pomodoro —/${perSet}` : `Pomodoro ${inSet}/${perSet}`;
+}
+
+function renderRing(phase, leftSeconds, config, longBreak) {
+  const minutes = phase === "BREAK" ? (longBreak ? config.long_break_minutes : config.break_minutes) : config.focus_minutes;
+  const total = (Number(minutes) || 0) * 60;
+  const fraction = phase === "IDLE" || !total ? 0 : Math.min(1, Math.max(0, leftSeconds / total));
+  $("ring-progress").style.strokeDashoffset = String(RING_LENGTH * (1 - fraction));
+  const lit = Math.round(fraction * 60);
+  [...$("ticks").children].forEach((tick, i) => tick.classList.toggle("lit", i < lit));
+}
+
+function luxFraction(lux) {
+  // Skala log: 1 lux di kiri, 2000 lux di kanan.
+  const value = Math.max(1, Math.min(LUX_SCALE_MAX, Number(lux) || 1));
+  return Math.log10(value) / Math.log10(LUX_SCALE_MAX);
+}
+
+function renderDesk(desk, config) {
+  if (!desk) return;
+  seenAt.edge1 = Date.now();
+  setPill($("edge1-state"), desk.online ? "Online" : "Offline", desk.online ? "ok" : "off");
+  const level = String(desk.light_level || "");
+  $("edge1-lux").replaceChildren(document.createTextNode(fmt(desk.lux_avg, 0)), Object.assign(document.createElement("small"), { textContent: "lux" }));
+  $("lux-level").textContent = level ? `Kategori: ${level}` : "—";
+  const litTicks = Math.round(luxFraction(desk.lux_avg) * (LUX_TICKS - 1)) + 1;
+  [...$("lux-ticks").children].forEach((tick, i) => {
+    tick.classList.toggle("lit", i < litTicks);
+    tick.classList.toggle("low", level !== "ideal");
+  });
+  if (config.lux_low) {
+    $("lux-low-mark").style.left = `calc(${luxFraction(config.lux_low) * 100}% - 1px)`;
+    $("lux-low-mark").dataset.label = `${config.lux_low} lux`;
+  }
+
+  const threshold = Number(config.desk_active_rms) || 0.09;
+  $("desk-dot").classList.toggle("on", Boolean(desk.active));
+  $("edge1-active").textContent = desk.active ? "Meja aktif · menulis/mengetik" : "Meja diam";
+  $("edge1-rms").textContent = `rms ${fmt(desk.desk_rms)} / ${threshold}`;
+  deskHistory.push(Number(desk.desk_rms) || 0);
+  if (deskHistory.length > SPARK_BARS) deskHistory.shift();
+  const top = Math.max(threshold * 2.5, ...deskHistory);
+  const bars = [...$("desk-spark").querySelectorAll("i")];
+  const offset = SPARK_BARS - deskHistory.length;
+  bars.forEach((bar, i) => {
+    const value = i >= offset ? deskHistory[i - offset] : 0;
+    bar.style.height = `${Math.max(2, (value / top) * 46)}px`;
+    bar.classList.toggle("hit", value >= threshold);
+  });
+  $("spark-line").style.bottom = `${(threshold / top) * 46}px`;
+}
+
+function renderPhone(phone) {
+  if (!phone) return;
+  seenAt.edge2 = Date.now();
+  setPill($("edge2-state"), phone.online ? "Online" : "Offline", phone.online ? "ok" : "off");
+  const down = Boolean(phone.face_down) && Number(phone.held_ratio) < 0.5;
+  $("phone-icon").className = `phone-icon ${down ? "down" : "up"}`;
+  $("edge2-face").textContent = down ? "Tertelungkup" : "Diangkat";
+  $("edge2-face").style.color = cssVar(down ? "--ok" : "--bad");
+  $("edge2-rms").textContent = `gerakan ${fmt(phone.motion_rms)} m/s²`;
+  const held = Math.round((Number(phone.held_ratio) || 0) * 100);
+  $("edge2-held").textContent = `${held}%`;
+  $("held-bar").style.width = `${held}%`;
+  $("held-bar").style.background = cssVar(held >= 50 ? "--bad" : "--ok");
+}
+
+function renderSummary(session) {
+  const focus = $("sum-focus");
+  if (typeof session.focus_minutes === "number") {
+    focus.replaceChildren(document.createTextNode(session.focus_minutes), Object.assign(document.createElement("small"), { textContent: "mnt" }));
+  } else focus.textContent = "—";
+  const pickups = $("sum-pickups");
+  if (typeof session.pickups === "number") {
+    pickups.replaceChildren(document.createTextNode(session.pickups), Object.assign(document.createElement("small"), { textContent: "kali" }));
+  } else pickups.textContent = "—";
+  $("sum-held").textContent = typeof session.held_seconds === "number" ? mmss(session.held_seconds) : "—";
+  $("sum-pomodoros").textContent = `${Number(session.pomodoros) || 0} pomodoro selesai`;
+  $("sum-score").textContent = typeof session.avg_score === "number" ? session.avg_score : "—";
+}
+
+function addAlert(target, data) {
+  alerts.unshift({ at: Number(data.at_ms) || Date.now(), target, message: String(data.message || data.event || "") });
+  alerts.length = Math.min(alerts.length, 30);
+  $("alert-count").textContent = String(alerts.length);
+  $("alerts").replaceChildren(...alerts.map((a) => {
+    const li = document.createElement("li");
+    const [name, cls] = TARGET[a.target];
+    const who = Object.assign(document.createElement("span"), { className: `who ${cls}`, textContent: name });
+    const msg = Object.assign(document.createElement("span"), { className: "msg", textContent: a.message });
+    const time = Object.assign(document.createElement("span"), { className: "time", textContent: clock(a.at) });
+    li.append(who, msg, time);
+    return li;
+  }));
+}
+
+function tick() {
+  $("clock").textContent = new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  for (const id of ["edge1", "edge2"]) {
+    if (seenAt[id]) $(`${id}-seen`).textContent = `Update ${Math.round((Date.now() - seenAt[id]) / 1000)} dtk lalu`;
+  }
+}
+
+function drawChart() {
+  const canvas = $("chart");
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  canvas.width = width * ratio; canvas.height = height * ratio;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(ratio, ratio);
+
+  const pad = { left: 30, right: 10, top: 10, bottom: 10 };
+  const count = Math.max(scores.length, 60);
+  const x = (i) => pad.left + (i / (count - 1)) * (width - pad.left - pad.right);
+  const y = (v) => pad.top + (1 - v / 100) * (height - pad.top - pad.bottom);
+
+  ctx.font = `11px ${cssVar("--mono") || "monospace"}`;
+  ctx.fillStyle = cssVar("--faint");
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  ctx.lineWidth = 1;
+  for (let v = 0; v <= 100; v += 25) {
+    ctx.beginPath(); ctx.moveTo(pad.left, y(v)); ctx.lineTo(width - pad.right, y(v)); ctx.stroke();
+    ctx.fillText(String(v), 0, y(v) + 4);
+  }
+  ctx.setLineDash([5, 5]);
+  ctx.strokeStyle = "rgba(255,255,255,0.3)";
+  ctx.beginPath(); ctx.moveTo(pad.left, y(GOOD_SCORE)); ctx.lineTo(width - pad.right, y(GOOD_SCORE)); ctx.stroke();
+  ctx.setLineDash([]);
+  if (scores.length === 0) return;
+
+  const ok = cssVar("--ok");
+  const gradient = ctx.createLinearGradient(0, y(100), 0, y(0));
+  gradient.addColorStop(0, "rgba(62, 224, 143, 0.32)");
+  gradient.addColorStop(1, "rgba(62, 224, 143, 0)");
+  ctx.beginPath();
+  scores.forEach((v, i) => (i === 0 ? ctx.moveTo(x(i), y(v)) : ctx.lineTo(x(i), y(v))));
+  ctx.lineTo(x(scores.length - 1), y(0));
+  ctx.lineTo(x(0), y(0));
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  ctx.shadowColor = ok;
+  ctx.shadowBlur = 10;
+  ctx.strokeStyle = ok;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  scores.forEach((v, i) => (i === 0 ? ctx.moveTo(x(i), y(v)) : ctx.lineTo(x(i), y(v))));
+  ctx.stroke();
+  const last = scores.length - 1;
+  ctx.fillStyle = ok;
+  ctx.beginPath(); ctx.arc(x(last), y(scores[last]), 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+}
+
+$("conn-form").addEventListener("submit", connect);
+$("disconnect-btn").addEventListener("click", disconnect);
+$("start-btn").addEventListener("click", () => sendControl("START"));
+$("pause-btn").addEventListener("click", () => sendControl("PAUSE"));
+$("stop-btn").addEventListener("click", () => sendControl("STOP"));
+window.addEventListener("resize", drawChart);
+loadSettings();
+
+// When opened through "python detector.py", the local HTTP server provides
+// only PUBLIC configuration. Broker username/password never leave the laptop.
+async function applyLocalConfig() {
+  try {
+    const response = await fetch("/config.json", { cache: "no-store" });
+    if (!response.ok) return;
+    const config = await response.json();
+    if (!/^[A-Za-z0-9_-]+$/.test(config.project_id || "")) return;
+    $("project").value = config.project_id;
+    if (config.websocket_url) $("url").value = config.websocket_url;
+    $("username").value = "";
+    $("password").value = "";
+    if (config.automatic_connection) {
+      $("conn-form").requestSubmit();
+    } else {
+      $("settings").open = true;
+      setPill($("conn"), "Atur kredensial MQTT", "info");
+    }
+  } catch (_) {
+    // Opened as a standalone static HTML file: manual form still works.
+  }
+}
+applyLocalConfig();
+drawChart();
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

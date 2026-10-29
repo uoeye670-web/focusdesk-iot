@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FocusDesk · HP Pribadi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Serif:ital@0;1&display=swap">
+<!-- MQTT.js: client MQTT di browser lewat WebSocket (wss://) -->
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.16.1/dist/mqtt.min.js"></script>
+<style>
+  /* Layout: one phone-width column of frosted-glass widgets on the same dark
+     dot-grid canvas as the laptop dashboard; the page glows in the state colour. */
+  :root {
+    color-scheme: dark;
+    --bg: #070a12;
+    --glass: rgba(255, 255, 255, 0.045);
+    --glass-strong: rgba(255, 255, 255, 0.075);
+    --edge: rgba(255, 255, 255, 0.09);
+    --text: #eef2f6; --muted: #93a1b0; --faint: #5d6a78;
+    --ok: #3ee08f; --bad: #ff5468; --warn: #ffc247; --info: #5cc8f2; --off: #8a96a3;
+    --state: var(--off);
+    --font: "Plus Jakarta Sans", -apple-system, "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    --serif: "Instrument Serif", Georgia, serif;
+  }
+  body[data-state="ok"] { --state: var(--ok); }
+  body[data-state="bad"] { --state: var(--bad); }
+  body[data-state="warn"] { --state: var(--warn); }
+  body[data-state="info"] { --state: var(--info); }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body { margin: 0; min-height: 100vh; color: var(--text); font: 15px/1.5 var(--font); background: var(--bg); position: relative; overflow-x: hidden; }
+  body::before { content: ""; position: fixed; inset: -20%; z-index: 0; pointer-events: none;
+    background: radial-gradient(45% 30% at 50% 22%, color-mix(in srgb, var(--state) 30%, transparent), transparent 70%); transition: background .6s; }
+  body::after { content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background-image: radial-gradient(rgba(255,255,255,0.07) 1px, transparent 1px); background-size: 22px 22px;
+    mask-image: linear-gradient(to bottom, black, transparent 90%); }
+  main { position: relative; z-index: 1; max-width: 520px; margin: 0 auto; display: grid; gap: 12px;
+         padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(40px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  h1, h2, p { margin: 0; }
+  .micro { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .glass { background: var(--glass); border: 1px solid var(--edge); border-radius: 22px; padding: 16px 18px;
+           backdrop-filter: blur(18px) saturate(140%); -webkit-backdrop-filter: blur(18px) saturate(140%);
+           box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 20px 40px -24px rgba(0,0,0,0.8); }
+
+  header { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 2px 2px 0; }
+  header h1 { font-size: 20px; font-weight: 800; letter-spacing: -0.02em; }
+  header h1 em { font-family: var(--serif); font-weight: 400; font-size: 24px; color: var(--state); transition: color .4s; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font: 700 12px var(--mono);
+          border: 1px solid currentColor; max-width: 100%; }
+  .pill::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); } .info { color: var(--info); } .off { color: var(--off); }
+
+  /* hero: phone icon + big state */
+  .hero { display: grid; justify-items: center; gap: 14px; text-align: center; padding: 24px 18px 22px; overflow: hidden; position: relative; }
+  .hero::after { content: ""; position: absolute; inset: auto -40px -80px; height: 180px; pointer-events: none;
+                 background: radial-gradient(closest-side, color-mix(in srgb, var(--state) 35%, transparent), transparent); transition: background .5s; }
+  .hud { position: relative; width: 190px; aspect-ratio: 1; display: grid; place-items: center; }
+  .hud svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .hud .tick { stroke: rgba(255,255,255,0.14); stroke-width: 2; stroke-linecap: round; transition: stroke .4s; }
+  .hud .tick.major { stroke-width: 3; }
+  body[data-state] .hud .tick.major { stroke: var(--state); }
+  .phone-icon { width: 62px; height: 108px; border-radius: 15px; border: 3px solid var(--state); position: relative;
+                transition: transform .5s cubic-bezier(.3,1.4,.5,1), border-color .3s, box-shadow .3s; box-shadow: 0 0 24px -6px var(--state); }
+  .phone-icon::after { content: ""; position: absolute; left: 50%; top: 8px; width: 16px; height: 4px; border-radius: 2px; background: var(--state); transform: translateX(-50%); }
+  .phone-icon.down { transform: rotate(180deg); }
+  .phone-icon.up { transform: rotate(-14deg) translateY(-6px); }
+  #big-state { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1; padding: 0; border: none; background: none; }
+  #big-state::before { display: none; }
+  .hero-sub { color: var(--muted); font-size: 14px; max-width: 34ch; }
+
+  /* steps */
+  .step { display: grid; gap: 12px; }
+  .step-head { display: flex; align-items: baseline; gap: 10px; }
+  .step-head .idx { font: 700 12px var(--mono); color: var(--state); }
+  .step-head h2 { font-size: 16px; font-weight: 800; }
+  .step p { color: var(--muted); font-size: 14px; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  input { font: 16px var(--font); padding: 11px 12px; border-radius: 12px; border: 1px solid var(--edge); background: rgba(0,0,0,0.3); color: var(--text); width: 100%; }
+  input:disabled { opacity: .6; }
+  button { font: 700 15px var(--font); padding: 13px 18px; border-radius: 999px; border: 1px solid var(--edge);
+           background: var(--glass-strong); color: var(--text); cursor: pointer; width: 100%; transition: transform .08s, background .2s, box-shadow .2s; }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--info); outline-offset: 3px; }
+  button.primary { background: var(--text); color: #0b0f17; border-color: var(--text); }
+  button.primary:not(:disabled) { box-shadow: 0 0 24px rgba(255,255,255,0.18); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .buttons { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; }
+  #calib-state { justify-self: start; white-space: normal; text-align: left; }
+
+  /* telemetry bento */
+  .bento { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .tile { display: grid; gap: 6px; align-content: space-between; min-height: 92px; }
+  .tile dd { margin: 0; font: 700 22px var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
+  .tile dt { font: 500 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .tile.wide { grid-column: span 2; min-height: 0; }
+  .tile.wide dd { font-size: 15px; font-weight: 500; }
+  #topic { font: 500 11px var(--mono); color: var(--faint); overflow-wrap: anywhere; padding: 0 4px; }
+
+  /* alert overlay */
+  #alert { display: none; position: fixed; inset: 0; z-index: 10; place-content: center; gap: 18px; text-align: center;
+           padding: max(32px, env(safe-area-inset-top)) 24px max(32px, env(safe-area-inset-bottom));
+           background: radial-gradient(70% 55% at 50% 45%, rgba(255, 84, 104, 0.55), rgba(40, 6, 12, 0.96) 75%);
+           backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); color: #fff; }
+  #alert.break { background: radial-gradient(70% 55% at 50% 45%, rgba(92, 200, 242, 0.5), rgba(5, 20, 32, 0.96) 75%); }
+  #alert.show { display: grid; animation: flash 1s ease-in-out infinite alternate; }
+  @keyframes flash { to { filter: brightness(1.25); } }
+  #alert .micro { color: rgba(255,255,255,0.75); }
+  #alert strong { font-family: var(--serif); font-weight: 400; font-style: italic; font-size: 46px; line-height: 1.05; }
+  #alert p { font-size: 19px; max-width: 26ch; margin: 0 auto; }
+  #alert button { background: #fff; color: #0b0f17; border: none; max-width: 300px; margin: 6px auto 0; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body data-state="off">
+<div id="alert" role="alert" aria-live="assertive">
+  <span class="micro">FocusDesk · peringatan</span>
+  <strong id="alert-title">Kamu terdistraksi!</strong>
+  <p id="alert-text"></p>
+  <button type="button" id="alert-close">Oke, lanjut belajar</button>
+</div>
+
+<main>
+  <header>
+    <h1>Focus<em>Desk</em></h1>
+    <span id="conn" class="pill off">MQTT belum terhubung</span>
+  </header>
+
+  <section class="glass hero" aria-label="Posisi HP">
+    <span class="micro">Edge 02 · HP pribadi</span>
+    <div class="hud">
+      <svg viewBox="0 0 190 190" aria-hidden="true"><g id="ticks"></g></svg>
+      <div class="phone-icon" id="phone-icon"></div>
+    </div>
+    <div id="big-state" class="off">Belum mulai</div>
+    <p class="hero-sub" id="hero-sub">Kalibrasi, tekan mulai, lalu telungkupkan HP di meja.</p>
+  </section>
+
+  <section class="glass step">
+    <div class="step-head"><span class="idx">01</span><h2>Pengaturan</h2></div>
+    <label>PROJECT_ID (harus sama dengan .env di laptop)
+      <input id="project" placeholder="focusdesk_kelompok07" autocapitalize="off" autocomplete="off" spellcheck="false">
+    </label>
+    <label>Broker MQTT (WebSocket)
+      <input id="url" value="wss://broker.hivemq.com:8884/mqtt" autocapitalize="off" spellcheck="false">
+    </label>
+  </section>
+
+  <section class="glass step">
+    <div class="step-head"><span class="idx">02</span><h2>Kalibrasi posisi</h2></div>
+    <p>Letakkan HP <b>terlentang</b> (layar menghadap ke atas) di meja, lalu tekan tombol di bawah. Pilih <b>Izinkan</b> saat diminta akses sensor gerak.</p>
+    <button type="button" id="calibrate-btn">Kalibrasi (HP terlentang di meja)</button>
+    <span id="calib-state" class="pill off">Belum dikalibrasi</span>
+  </section>
+
+  <section class="glass step">
+    <div class="step-head"><span class="idx">03</span><h2>Mulai</h2></div>
+    <div class="buttons">
+      <button type="button" class="primary" id="start-btn" disabled>Mulai kirim data</button>
+      <button type="button" id="stop-btn" disabled>Berhenti</button>
+    </div>
+    <p>Setelah mulai, <b>telungkupkan HP</b> di meja. Jangan kunci layar dan jangan pindah aplikasi.</p>
+  </section>
+
+  <dl class="bento">
+    <div class="glass tile"><dt>Sumbu z</dt><dd id="v-z">—</dd></div>
+    <div class="glass tile"><dt>Putaran</dt><dd id="v-rot">—</dd></div>
+    <div class="glass tile"><dt>Event sensor</dt><dd id="v-events">0</dd></div>
+    <div class="glass tile"><dt>Terkirim</dt><dd id="v-sent">0</dd></div>
+    <div class="glass tile"><dt>Terakhir dikirim</dt><dd id="v-last">—</dd></div>
+    <div class="glass tile"><dt>Layar menyala</dt><dd id="v-wake" style="font-size:15px">—</dd></div>
+  </dl>
+
+  <p id="topic"></p>
+</main>
+
+<script>
+"use strict";
+// Sama dengan shared/processing.py, tanpa proximity (tidak tersedia di browser).
+const SAMPLE_MS = 100;          // ambil 1 sampel tiap 100 ms
+const WINDOW_SAMPLES = 10;      // 10 sampel = 1 window ≈ 1 detik
+const FACE_DOWN_Z = 7.0;        // |z| minimal (m/s²) agar dianggap rata di meja
+const HANDLING_RAD_S = 0.6;     // gyroscope: berputar lebih cepat dari ini = sedang dipegang
+
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
+  set(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* abaikan */ } },
+};
+
+let latest = null;               // pembacaan devicemotion terakhir
+let events = 0, sent = 0, sequence = 0;
+let faceDownSign = Number(store.get("focusdesk-facedown-sign")) || 0;  // +1 / -1 setelah kalibrasi
+let client = null, sampler = null, wakeLock = null, audio = null;
+let windowSamples = [];
+const bootId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+
+function setPill(el, text, cls) { el.textContent = text; el.className = el.className.replace(/\b(ok|bad|warn|info|off)\b/g, "").trim() + " " + cls; }
+
+// Tampilan besar di atas: ikon HP, teks posisi, dan warna pendaran halaman.
+function setPhoneState(label, cls, position, sub) {
+  setPill($("big-state"), label, cls);
+  document.body.dataset.state = cls;
+  $("phone-icon").className = `phone-icon ${position}`;
+  $("hero-sub").textContent = sub;
+}
+
+(function buildTicks() {
+  const ns = "http://www.w3.org/2000/svg";
+  for (let i = 0; i < 48; i++) {
+    const angle = (i / 48) * Math.PI * 2;
+    const major = i % 4 === 0;
+    const inner = major ? 80 : 84, outer = 92;
+    const line = document.createElementNS(ns, "line");
+    line.setAttribute("x1", 95 + inner * Math.cos(angle)); line.setAttribute("y1", 95 + inner * Math.sin(angle));
+    line.setAttribute("x2", 95 + outer * Math.cos(angle)); line.setAttribute("y2", 95 + outer * Math.sin(angle));
+    line.setAttribute("class", major ? "tick major" : "tick");
+    $("ticks").appendChild(line);
+  }
+})();
+
+// ---------- pengaturan ----------
+const params = new URLSearchParams(location.search);
+$("project").value = params.get("project") || store.get("focusdesk-project") || "";
+if (store.get("focusdesk-url")) $("url").value = store.get("focusdesk-url");
+if (faceDownSign) setPill($("calib-state"), "Sudah dikalibrasi", "ok");
+
+// ---------- sensor ----------
+async function askMotionPermission() {
+  if (typeof DeviceMotionEvent === "undefined") throw new Error("Browser ini tidak mendukung sensor gerak");
+  if (typeof DeviceMotionEvent.requestPermission === "function") {
+    const result = await DeviceMotionEvent.requestPermission();  // iOS: wajib dipanggil dari klik
+    if (result !== "granted") throw new Error("Izin sensor gerak ditolak. Tutup tab lalu buka lagi halaman ini");
+  }
+  window.removeEventListener("devicemotion", onMotion);
+  window.addEventListener("devicemotion", onMotion);
+}
+
+function onMotion(event) {
+  const a = event.accelerationIncludingGravity;
+  if (!a || a.z === null || a.z === undefined) return;
+  const r = event.rotationRate || {};
+  const toRad = (deg) => ((Number(deg) || 0) * Math.PI) / 180;  // rotationRate dalam derajat/detik
+  latest = {
+    accel: [Number(a.x) || 0, Number(a.y) || 0, Number(a.z) || 0],
+    angular: Math.hypot(toRad(r.alpha), toRad(r.beta), toRad(r.gamma)),
+  };
+  events += 1;
+}
+
+function waitForReading(timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if (latest) { clearInterval(timer); resolve(latest); }
+      else if (Date.now() - started > timeoutMs) {
+        clearInterval(timer);
+        reject(new Error("Tidak ada data sensor. Pastikan halaman dibuka lewat https:// dan izin sensor gerak diberikan"));
+      }
+    }, 100);
+  });
+}
+
+async function calibrate() {
+  try {
+    unlockAudio();
+    setPill($("calib-state"), "Membaca sensor…", "info");
+    await askMotionPermission();
+    const reading = await waitForReading(3000);
+    const z = reading.accel[2];
+    if (Math.abs(z) < FACE_DOWN_Z) {
+      setPill($("calib-state"), `HP belum rata (z=${z.toFixed(1)}). Letakkan terlentang di meja lalu ulangi`, "warn");
+      return;
+    }
+    // Terlentang memberi z dengan tanda tertentu; telungkup adalah kebalikannya.
+    // (iPhone dan Android memakai tanda yang berlawanan, jadi tidak di-hardcode.)
+    faceDownSign = -Math.sign(z);
+    store.set("focusdesk-facedown-sign", String(faceDownSign));
+    setPill($("calib-state"), "Sudah dikalibrasi", "ok");
+    $("start-btn").disabled = false;
+  } catch (err) {
+    setPill($("calib-state"), err.message, "bad");
+  }
+}
+
+// ---------- processing (sama dengan extract_phone_features) ----------
+function isFaceDown(sample) {
+  const z = sample.accel[2];
+  return Math.sign(z) === faceDownSign && Math.abs(z) >= FACE_DOWN_Z;
+}
+
+function extractFeatures(samples) {
+  const held = samples.map((s) => !isFaceDown(s) || s.angular > HANDLING_RAD_S);
+  // RMS per sumbu (x, y, z) di sekitar rata-rata window, seperti _vibration_rms di Python.
+  let variance = 0;
+  for (let axis = 0; axis < 3; axis++) {
+    const values = samples.map((s) => s.accel[axis]);
+    const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+    variance += values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+  }
+  const motionRms = Math.sqrt(variance);
+  return {
+    face_down: !held[held.length - 1],
+    held_ratio: Number((held.filter(Boolean).length / held.length).toFixed(3)),
+    motion_rms: Number(motionRms.toFixed(4)),
+  };
+}
+
+// ---------- MQTT ----------
+function base() { return `focusdesk/${$("project").value.trim()}`; }
+
+function connect() {
+  const url = $("url").value.trim();
+  client = mqtt.connect(url, {
+    clientId: `${$("project").value.trim()}-edge2-web-${bootId.slice(0, 8)}`,
+    protocolVersion: 4, reconnectPeriod: 3000, connectTimeout: 10000,
+  });
+  client.on("connect", () => {
+    setPill($("conn"), "MQTT terhubung", "ok");
+    client.subscribe(`${base()}/alerts/edge2`, { qos: 1 });
+  });
+  client.on("reconnect", () => setPill($("conn"), "Menyambung ulang…", "warn"));
+  client.on("offline", () => setPill($("conn"), "MQTT terputus (cek internet)", "bad"));
+  client.on("error", (err) => setPill($("conn"), `Error: ${err.message}`, "bad"));
+  client.on("message", (topic, payload) => {
+    try { showAlert(JSON.parse(payload.toString())); } catch (e) { /* abaikan pesan rusak */ }
+  });
+}
+
+function sample() {
+  if (!latest) return;
+  windowSamples.push(latest);
+  $("v-z").textContent = `${latest.accel[2].toFixed(2)} m/s²`;
+  $("v-rot").textContent = `${latest.angular.toFixed(2)} rad/s`;
+  $("v-events").textContent = String(events);
+  if (windowSamples.length < WINDOW_SAMPLES) return;
+
+  const features = extractFeatures(windowSamples);
+  windowSamples = [];
+  const faceDown = features.face_down && features.held_ratio < 0.5;
+  if (faceDown) setPhoneState("Tertelungkup", "ok", "down", "HP aman di meja. Lanjutkan belajar.");
+  else setPhoneState("Dipegang", "warn", "up", "HP sedang diangkat atau terbuka.");
+  if (!client || !client.connected) return;
+  const telemetry = { device_id: "edge2", boot_id: bootId, sequence, sent_at_ms: Date.now(), ...features };
+  client.publish(`${base()}/edge/edge2/telemetry`, JSON.stringify(telemetry), { qos: 1 });
+  sequence += 1;
+  sent += 1;
+  $("v-sent").textContent = String(sent);
+  $("v-last").textContent = new Date().toLocaleTimeString("id-ID");
+}
+
+async function start() {
+  const project = $("project").value.trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(project)) { setPill($("conn"), "Isi PROJECT_ID dulu (huruf, angka, _ atau -)", "bad"); return; }
+  if (!/^wss?:\/\//.test($("url").value.trim())) { setPill($("conn"), "URL broker harus diawali wss://", "bad"); return; }
+  if (typeof mqtt === "undefined") { setPill($("conn"), "Library MQTT gagal dimuat (cek internet)", "bad"); return; }
+  if (!faceDownSign) { setPill($("calib-state"), "Kalibrasi dulu", "warn"); return; }
+  store.set("focusdesk-project", project);
+  store.set("focusdesk-url", $("url").value.trim());
+  unlockAudio();
+  try { await askMotionPermission(); } catch (err) { setPill($("calib-state"), err.message, "bad"); return; }
+
+  connect();
+  sampler = setInterval(sample, SAMPLE_MS);
+  await keepScreenOn();
+  $("topic").textContent = `PUB ${base()}/edge/edge2/telemetry · SUB ${base()}/alerts/edge2`;
+  $("start-btn").disabled = true;
+  $("stop-btn").disabled = false;
+  for (const id of ["project", "url", "calibrate-btn"]) $(id).disabled = true;
+}
+
+function stop() {
+  clearInterval(sampler);
+  if (client) client.end(true);
+  client = null;
+  if (wakeLock) wakeLock.release().catch(() => {});
+  wakeLock = null;
+  setPill($("conn"), "Berhenti", "off");
+  setPhoneState("Berhenti", "off", "", "Tekan mulai untuk mengirim data lagi.");
+  $("start-btn").disabled = false;
+  $("stop-btn").disabled = true;
+  for (const id of ["project", "url", "calibrate-btn"]) $(id).disabled = false;
+}
+
+// ---------- layar tetap menyala ----------
+async function keepScreenOn() {
+  if (!("wakeLock" in navigator)) { $("v-wake").textContent = "Tidak didukung, atur Auto-Lock: Never"; return; }
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    $("v-wake").textContent = "Aktif";
+  } catch (err) {
+    $("v-wake").textContent = "Gagal, atur Auto-Lock: Never";
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && sampler && !wakeLock) keepScreenOn();
+  if (document.visibilityState === "hidden") wakeLock = null;
+});
+
+// ---------- alert: layar merah + bunyi (+ getar jika didukung) ----------
+function unlockAudio() {
+  // iOS hanya mengizinkan suara setelah ada klik dari pengguna.
+  if (audio) return;
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (AudioCtx) { audio = new AudioCtx(); audio.resume().catch(() => {}); }
+}
+
+function beep(times) {
+  if (!audio) return;
+  for (let i = 0; i < times; i++) {
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    const at = audio.currentTime + i * 0.35;
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.4, at);
+    gain.gain.exponentialRampToValueAtTime(0.001, at + 0.25);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(at);
+    osc.stop(at + 0.3);
+  }
+}
+
+function showAlert(alert) {
+  const isBreak = alert.event === "BREAK";
+  $("alert-title").textContent = isBreak ? "Waktunya istirahat" : "Kamu terdistraksi!";
+  $("alert-text").textContent = String(alert.message || "");
+  $("alert").classList.toggle("break", isBreak);
+  $("alert").classList.add("show");
+  beep(isBreak ? 2 : 4);
+  if (navigator.vibrate) navigator.vibrate(isBreak ? 800 : [500, 200, 500]);
+}
+
+$("alert-close").addEventListener("click", () => $("alert").classList.remove("show"));
+$("calibrate-btn").addEventListener("click", calibrate);
+$("start-btn").addEventListener("click", start);
+$("stop-btn").addEventListener("click", stop);
+if (faceDownSign) $("start-btn").disabled = false;
+</script>
+</body>
+</html>
