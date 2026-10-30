@@ -47,9 +47,58 @@ class ScoreTests(unittest.TestCase):
 
 
 class FocusDetectorTests(unittest.TestCase):
-    def test_idle_until_start(self):
+    def test_idle_while_phone_is_up(self):
         session = Session()
-        self.assertEqual(session.run(5), "IDLE")
+        self.assertEqual(session.run(10, face_down=False, held_ratio=1.0), "IDLE")
+
+    def test_flipping_phone_face_down_starts_session(self):
+        session = Session()
+        session.run(2, face_down=False, held_ratio=1.0)
+        session.run(6)
+        self.assertEqual(session.detector.phase, "FOCUS")
+        self.assertIn("SESSION_START", [a.event for a in session.alerts])
+
+    def test_stop_needs_phone_lifted_before_next_auto_start(self):
+        session = Session()
+        session.start()
+        session.run(10)
+        session.detector.control("STOP", session.now())
+        self.assertEqual(session.run(10), "IDLE")
+        session.run(2, face_down=False, held_ratio=1.0)
+        session.run(6)
+        self.assertEqual(session.detector.phase, "FOCUS")
+
+    def test_phone_taken_away_pauses_and_flip_resumes(self):
+        config = FocusConfig(focus_minutes=5, break_minutes=1, away_seconds=20, idle_seconds=300)
+        session = Session(config)
+        session.start()
+        session.run(10)
+        self.assertEqual(session.run(10, face_down=False, held_ratio=1.0), "TERDISTRAKSI")
+        self.assertEqual(session.run(12, face_down=False, held_ratio=1.0), "DITINGGAL")
+        left = session.detector.phase_left_s
+        session.run(30, face_down=False, held_ratio=1.0)
+        self.assertEqual(session.detector.phase_left_s, left)
+        self.assertEqual(session.run(6), "FOKUS")
+        self.assertIn("SESSION_RESUME", [a.event for a in session.alerts])
+
+    def test_distracted_pomodoro_gets_longer_break(self):
+        session = Session(FocusConfig(focus_minutes=1, break_minutes=1, away_seconds=300, idle_seconds=300))
+        session.start()
+        # Meja diam, gelap, dan HP sering disentuh (tapi tidak sampai diangkat lama): skor rendah.
+        session.run(61, desk_rms=0.0, lux=50, held_ratio=0.4)
+        record = session.detector.history[-1]
+        self.assertLess(record["score"], 60)
+        self.assertEqual(record["break_minutes"], 1.8)
+        self.assertAlmostEqual(session.detector.phase_left_s, 1.8 * 60, delta=2)
+
+    def test_focused_pomodoro_keeps_normal_break(self):
+        session = Session(FocusConfig(focus_minutes=1, break_minutes=1))
+        session.start()
+        session.run(61)
+        record = session.detector.history[-1]
+        self.assertGreaterEqual(record["score"], 80)
+        self.assertEqual(record["break_minutes"], 1)
+        self.assertEqual(record["number"], 1)
 
     def test_waiting_for_edges(self):
         session = Session()

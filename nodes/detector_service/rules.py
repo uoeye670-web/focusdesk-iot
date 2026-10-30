@@ -1,6 +1,9 @@
 """NODE 3: FocusDesk algorithm (pure Python, no MQTT dependency).
 
-Sensor fusion of two edges into a focus score + Pomodoro state machine.
+Adaptive Pomodoro driven by sensor fusion of two edges:
+  - flipping HP B face down starts (or resumes) a focus session by itself,
+  - taking HP B away for longer than AWAY_SECONDS pauses the timer by itself,
+  - the focus score of each finished pomodoro sets how long the next break is.
 Make changes here when experimenting with thresholds or a new AI model.
 Time always comes in as `now_ms`, so tests can replay a whole session instantly.
 """
@@ -14,6 +17,11 @@ from shared.messages import DeskTelemetry, PhoneTelemetry, Telemetry
 WEIGHT_PHONE = 0.45
 WEIGHT_DESK = 0.35
 WEIGHT_LIGHT = 0.20
+
+# Adaptive break: (minimum focus score of the finished pomodoro, break multiplier).
+# A distracted pomodoro is a sign of fatigue, so the following break is longer.
+ADAPTIVE_BREAK = ((80, 1.0), (60, 1.4), (0, 1.8))
+HISTORY_LENGTH = 12
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,11 @@ class FocusConfig:
     score_window_seconds: float = 60
     distraction_alert_every_s: float = 15
     reminder_every_s: float = 60
+    # HP B face down this long starts or resumes a session automatically.
+    auto_start_seconds: float = 3
+    # HP B taken away (not face down) this long pauses the focus timer automatically.
+    away_seconds: float = 60
+    adaptive_break: bool = True
 
     @staticmethod
     def from_env() -> "FocusConfig":
@@ -45,6 +58,7 @@ class FocusConfig:
             "long_break_minutes": "LONG_BREAK_MINUTES", "pomodoros_per_set": "POMODOROS_PER_SET",
             "lux_low": "LUX_LOW", "lux_high": "LUX_HIGH",
             "desk_active_rms": "DESK_ACTIVE_RMS", "idle_seconds": "IDLE_SECONDS",
+            "away_seconds": "AWAY_SECONDS",
         }
         values = {}
         for field, env_name in names.items():
@@ -77,10 +91,26 @@ def light_level(lux: float, config: FocusConfig) -> str:
     return "ideal"
 
 
+def break_multiplier(pomodoro_score: float | None) -> float:
+    """How much longer the break gets after a pomodoro with this average focus score."""
+    if pomodoro_score is None:
+        return 1.0
+    return next(factor for minimum, factor in ADAPTIVE_BREAK if pomodoro_score >= minimum)
+
+
 def focus_score(held_ratio: float, desk_active: bool, lux: float, config: FocusConfig) -> float:
     """0-100: HP tidak dipegang (45%) + meja aktif (35%) + cahaya ideal (20%)."""
     light = 1.0 if light_level(lux, config) == "ideal" else 0.5
     return 100 * (WEIGHT_PHONE * (1 - held_ratio) + WEIGHT_DESK * float(desk_active) + WEIGHT_LIGHT * light)
+
+
+def duration_text(minutes: float) -> str:
+    """7 -> "7 menit", 1.4 -> "1 menit 24 detik" (spoken by HP A)."""
+    whole = int(minutes)
+    seconds = round((minutes - whole) * 60)
+    if seconds == 0:
+        return f"{whole} menit"
+    return f"{whole} menit {seconds} detik" if whole else f"{seconds} detik"
 
 
 def clock(seconds: float) -> str:
@@ -101,12 +131,20 @@ class FocusDetector:
         self.cycle = 0  # focus session number within the whole study session
         self.completed_pomodoros = 0
         self.long_break = False
+        self.phase_total_s = 0.0
+        self.auto_paused = False
+        # After STOP the phone usually still lies face down; it must be lifted once
+        # before flipping it starts a new session, or STOP would undo itself.
+        self.auto_start_armed = True
+        self.phone_down_since_ms: int | None = None
+        self.phone_up_since_ms: int | None = None
         self.status = "IDLE"
-        self.reason = "Tekan START untuk memulai sesi belajar"
+        self.reason = "Telungkupkan HP B untuk memulai, atau tekan START"
         self.last_tick_ms: int | None = None
         self._reset_session(0)
 
     def _reset_session(self, now_ms: int):
+        self.history: list[dict] = []
         self.pickups = 0
         self.held_seconds = 0.0
         self.focus_seconds = 0.0
@@ -116,6 +154,15 @@ class FocusDetector:
         self.last_desk_active_ms = now_ms
         self.bad_light_since_ms: int | None = None
         self.last_alert_ms: dict[str, int] = {}
+        self._reset_pomodoro()
+
+    def _reset_pomodoro(self):
+        self.pomodoro_score_sum = 0.0
+        self.pomodoro_score_count = 0
+        self.pomodoro_start_pickups = self.pickups
+
+    def _phone_down(self) -> bool:
+        return self.phone is not None and self.phone.face_down and self.phone.held_ratio < 0.5
 
     # ---------- input: telemetry ----------
 
@@ -134,6 +181,15 @@ class FocusDetector:
             if self.phase == "FOCUS" and was_face_down and lifted:
                 self.pickups += 1
             self.phone = reading
+            if self._phone_down():
+                self.phone_up_since_ms = None
+                if self.phone_down_since_ms is None:
+                    self.phone_down_since_ms = now_ms
+            else:
+                self.phone_down_since_ms = None
+                self.auto_start_armed = True
+                if self.phone_up_since_ms is None:
+                    self.phone_up_since_ms = now_ms
         else:
             if reading.desk_rms >= self.config.desk_active_rms:
                 self.last_desk_active_ms = now_ms
@@ -148,19 +204,16 @@ class FocusDetector:
             raise ValueError(f"Unknown control command: {command[:40]}")
         alerts = []
         if command == "START" and self.phase == "IDLE":
-            self._reset_session(now_ms)
-            self.phase, self.cycle = "FOCUS", 1
-            self.completed_pomodoros, self.long_break = 0, False
-            self.phase_left_s = self.config.focus_minutes * 60
-            alerts.append(Alert("edge1", "SESSION_START",
-                                f"Sesi fokus dimulai, {self.config.focus_minutes:g} menit. Telungkupkan HP kamu."))
+            alerts.append(self._start_session(now_ms, automatic=False))
         elif command == "START" and self.phase == "PAUSED":
-            self.phase = self.paused_from
-            alerts.append(Alert("edge1", "SESSION_RESUME", "Sesi dilanjutkan."))
+            alerts.append(self._resume("Sesi dilanjutkan."))
         elif command == "PAUSE" and self.phase in ("FOCUS", "BREAK"):
             self.paused_from, self.phase = self.phase, "PAUSED"
+            self.auto_paused = False
         elif command == "STOP" and self.phase != "IDLE":
             self.phase = "IDLE"
+            self.auto_paused = False
+            self.auto_start_armed = False
             summary = self.summary()
             alerts.append(Alert("edge1", "SESSION_SUMMARY",
                                 f"Sesi selesai. {summary['pomodoros']} pomodoro, fokus {summary['focus_minutes']:g} menit, "
@@ -168,6 +221,21 @@ class FocusDetector:
         self.last_tick_ms = now_ms
         self._evaluate(now_ms, 0.0, alerts)
         return alerts
+
+    def _start_session(self, now_ms: int, automatic: bool) -> Alert:
+        self._reset_session(now_ms)
+        self.phase, self.cycle = "FOCUS", 1
+        self.completed_pomodoros, self.long_break, self.auto_paused = 0, False, False
+        self._set_phase_length(self.config.focus_minutes * 60)
+        how = "HP sudah ditelungkupkan. " if automatic else ""
+        return Alert("edge1", "SESSION_START", f"{how}Pomodoro 1 dimulai, {self.config.focus_minutes:g} menit.")
+
+    def _resume(self, message: str) -> Alert:
+        self.phase, self.auto_paused = self.paused_from, False
+        return Alert("edge1", "SESSION_RESUME", message)
+
+    def _set_phase_length(self, seconds: float):
+        self.phase_left_s = self.phase_total_s = seconds
 
     # ---------- clock: called every second by main.py ----------
 
@@ -177,30 +245,64 @@ class FocusDetector:
         self.last_tick_ms = now_ms
         alerts: list[Alert] = []
 
+        self._automatic_start_pause(now_ms, alerts)
         if self.phase in ("FOCUS", "BREAK"):
             self.phase_left_s -= dt
             if self.phase_left_s <= 0 and self.phase == "FOCUS":
-                self.completed_pomodoros += 1
-                self.long_break = self.completed_pomodoros % self.config.pomodoros_per_set == 0
-                self.phase = "BREAK"
-                if self.long_break:
-                    self.phase_left_s = self.config.long_break_minutes * 60
-                    message = (f"{self.config.pomodoros_per_set} pomodoro selesai. "
-                               f"Istirahat panjang {self.config.long_break_minutes:g} menit.")
-                else:
-                    self.phase_left_s = self.config.break_minutes * 60
-                    message = f"Pomodoro {self.pomodoro_in_set()} selesai. Istirahat {self.config.break_minutes:g} menit."
-                alerts += [Alert("edge1", "BREAK", message), Alert("edge2", "BREAK", message)]
+                alerts += self._finish_pomodoro()
             elif self.phase_left_s <= 0:
                 self.phase, self.cycle = "FOCUS", self.cycle + 1
                 self.long_break = False
-                self.phase_left_s = self.config.focus_minutes * 60
+                self._set_phase_length(self.config.focus_minutes * 60)
                 self.last_desk_active_ms = now_ms
+                self._reset_pomodoro()
                 alerts.append(Alert("edge1", "FOCUS",
                                     f"Istirahat selesai. Ayo mulai pomodoro {self.pomodoro_in_set()}."))
 
         self._evaluate(now_ms, dt, alerts)
         return alerts
+
+    def _automatic_start_pause(self, now_ms: int, alerts: list[Alert]):
+        """The phone itself is the Pomodoro switch: face down = study, taken away = pause."""
+        config = self.config
+        down_for = 0 if self.phone_down_since_ms is None else (now_ms - self.phone_down_since_ms) / 1000
+        up_for = 0 if self.phone_up_since_ms is None else (now_ms - self.phone_up_since_ms) / 1000
+        both_online = self._online("edge1", now_ms) and self._online("edge2", now_ms)
+
+        if self.phase == "IDLE" and self.auto_start_armed and both_online and down_for >= config.auto_start_seconds:
+            alerts.append(self._start_session(now_ms, automatic=True))
+        elif self.phase == "PAUSED" and self.auto_paused and down_for >= config.auto_start_seconds:
+            alerts.append(self._resume("Selamat datang kembali. Pomodoro dilanjutkan."))
+        elif self.phase == "FOCUS" and self._online("edge2", now_ms) and up_for >= config.away_seconds:
+            self.paused_from, self.phase, self.auto_paused = "FOCUS", "PAUSED", True
+            alerts.append(Alert("edge1", "AWAY",
+                                "HP dibawa pergi, timer dijeda. Telungkupkan lagi HP-nya untuk melanjutkan."))
+
+    def _finish_pomodoro(self) -> list[Alert]:
+        """End of a focus session: record its score and size the break to match it."""
+        self.completed_pomodoros += 1
+        self.long_break = self.completed_pomodoros % self.config.pomodoros_per_set == 0
+        score = (round(self.pomodoro_score_sum / self.pomodoro_score_count, 1)
+                 if self.pomodoro_score_count else None)
+        factor = break_multiplier(score) if self.config.adaptive_break else 1.0
+        base = self.config.long_break_minutes if self.long_break else self.config.break_minutes
+        break_minutes = round(base * factor, 2)
+        self.history.append({
+            "number": self.cycle,
+            "score": score,
+            "pickups": self.pickups - self.pomodoro_start_pickups,
+            "break_minutes": break_minutes,
+            "long_break": self.long_break,
+        })
+        del self.history[:-HISTORY_LENGTH]
+        self.phase = "BREAK"
+        self._set_phase_length(break_minutes * 60)
+
+        score_text = f", skor {score:.0f}" if score is not None else ""
+        kind = "Istirahat panjang" if self.long_break else "Istirahat"
+        extra = " Istirahat diperpanjang karena banyak distraksi." if factor > 1 else ""
+        message = f"Pomodoro {self.pomodoro_in_set()} selesai{score_text}. {kind} {duration_text(break_minutes)}.{extra}"
+        return [Alert("edge1", "BREAK", message), Alert("edge2", "BREAK", message)]
 
     def pomodoro_in_set(self) -> int:
         """Position 1..pomodoros_per_set of the current (or just finished) focus session."""
@@ -224,7 +326,11 @@ class FocusDetector:
 
     def _evaluate(self, now_ms: int, dt: float, alerts: list[Alert]):
         if self.phase == "IDLE":
-            return self._set("IDLE", "Tekan START untuk memulai sesi belajar")
+            if not self.auto_start_armed:
+                return self._set("IDLE", "Angkat lalu telungkupkan HP B untuk sesi baru, atau tekan START")
+            return self._set("IDLE", "Telungkupkan HP B untuk memulai, atau tekan START")
+        if self.phase == "PAUSED" and self.auto_paused:
+            return self._set("DITINGGAL", "HP B dibawa pergi. Telungkupkan lagi untuk melanjutkan")
         if self.phase == "PAUSED":
             return self._set("JEDA", "Sesi dijeda. Tekan START untuk melanjutkan")
         if self.phase == "BREAK":
@@ -246,6 +352,8 @@ class FocusDetector:
             self.scores.popleft()
         self.score_sum += score
         self.score_count += 1
+        self.pomodoro_score_sum += score
+        self.pomodoro_score_count += 1
 
         light = light_level(desk.lux_avg, config)
         if light == "ideal":
@@ -258,7 +366,9 @@ class FocusDetector:
         left = clock(self.phase_left_s)
 
         if held_ratio >= 0.5:
-            self._set("TERDISTRAKSI", "HP pribadi sedang dipegang saat sesi fokus")
+            up_for = 0 if self.phone_up_since_ms is None else (now_ms - self.phone_up_since_ms) / 1000
+            pause_in = max(0, round(config.away_seconds - up_for))
+            self._set("TERDISTRAKSI", f"HP pribadi dipegang. Timer dijeda otomatis dalam {pause_in} detik")
             self._alert_once_every("distraction", config.distraction_alert_every_s, now_ms, alerts,
                                    Alert("edge2", "DISTRACTED", f"Sisa {left}. Taruh HP-nya dan lanjut belajar!"))
         elif bad_light:
@@ -305,6 +415,14 @@ class FocusDetector:
                 "long_break": self.long_break,
             },
             "phase_left_s": max(0, round(self.phase_left_s)),
+            "phase_total_s": round(self.phase_total_s),
+            "auto": {
+                "paused": self.auto_paused,
+                "start_armed": self.auto_start_armed,
+                "away_seconds": self.config.away_seconds,
+                "adaptive_break": self.config.adaptive_break,
+            },
+            "history": self.history,
             "focus_score": self.current_score() if self.phase == "FOCUS" else None,
             "session": self.summary(),
             "desk": None if desk is None else {

@@ -79,11 +79,20 @@ Accelerometer HP murah punya noise yang besar, sehingga rata-rata getaran saat m
 | 4 | Tidak ada window dengan `desk_rms ≥ DESK_ACTIVE_RMS` selama `IDLE_SECONDS` | `MELAMUN` | HP A suara, maksimal tiap 60 detik |
 | 5 | Selain itu | `FOKUS` | – |
 
-### Pomodoro
+### Pomodoro adaptif
 
-`IDLE → (START) → FOCUS → (timer habis) → BREAK → (timer habis) → FOCUS siklus berikutnya ...`
+```
+IDLE ──(HP B telungkup ≥ 3 dtk, atau START)──► FOCUS ──(timer habis)──► BREAK adaptif ──(timer habis)──► FOCUS berikutnya
+                                                 │  ▲
+                (HP B tidak telungkup ≥ AWAY_SECONDS)  (HP B telungkup lagi ≥ 3 dtk)
+                                                 ▼  │
+                                              PAUSED (status DITINGGAL)
+```
 
-`PAUSE` membekukan timer, `START` melanjutkan, dan `STOP` mengakhiri sesi lalu HP A membacakan ringkasan (menit fokus, berapa kali HP diambil).
+- **Istirahat adaptif:** skor fokus dirata-rata per pomodoro. Skor ≥ 80 → istirahat normal, 60–79 → × 1,4, < 60 → × 1,8. Setiap 4 pomodoro istirahatnya panjang (15 menit, juga dikalikan faktor yang sama).
+- **Laporan per pomodoro:** nomor, skor, jumlah HP diambil, dan lama istirahat disimpan di `history` pada pesan status.
+- Setelah `STOP`, HP B harus diangkat sekali dulu sebelum menelungkupkannya bisa memulai sesi baru, supaya STOP tidak langsung dibatalkan oleh HP yang masih tertelungkup.
+- `PAUSE` manual membekukan timer sampai `START` ditekan lagi, dan `STOP` mengakhiri sesi lalu HP A membacakan ringkasan.
 
 ### Keamanan sederhana
 

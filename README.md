@@ -1,14 +1,25 @@
 # FocusDesk IoT
 
-Pemantau fokus belajar berbasis IoT: **2 HP Android sebagai edge**, **3 sensor** (cahaya, proximity, accelerometer), **4 data processing**, algoritma **skor fokus + Pomodoro**, komunikasi **MQTT Cloud (HiveMQ)**, dan **dashboard di laptop**.
+**Pomodoro adaptif dengan deteksi distraksi otomatis.** Dua HP sebagai edge (cahaya, accelerometer, proximity/gyroscope), 4 data processing, algoritma **Pomodoro adaptif berbasis sensor fusion**, komunikasi **MQTT Cloud (HiveMQ)**, dan **dashboard di laptop**.
+
+## Pomodoro adaptif
+
+Dasar programnya teknik Pomodoro (25 menit fokus, 5 menit istirahat, istirahat panjang setiap 4 sesi), tetapi dijalankan oleh sensor:
+
+| Fitur | Cara kerja |
+|---|---|
+| **Mulai sendiri** | HP B ditelungkupkan ≥ 3 detik, pomodoro langsung berjalan tanpa menekan START |
+| **Jeda sendiri** | HP B tidak telungkup ≥ `AWAY_SECONDS` (60 detik), pengguna dianggap meninggalkan meja dan timer dijeda. Telungkupkan lagi untuk melanjutkan |
+| **Istirahat adaptif** | Skor fokus rata-rata tiap pomodoro menentukan istirahat: ≥ 80 normal, 60–79 × 1,4, < 60 × 1,8 |
+| **Laporan per pomodoro** | Skor, jumlah HP diambil, dan lama istirahat untuk setiap pomodoro tampil di dashboard |
 
 ## Masalah & ide
 
 Mahasiswa sering merasa sudah belajar berjam-jam, padahal sebagian waktunya habis untuk mengecek HP, melamun, atau belajar di cahaya yang kurang. FocusDesk mengukur fokus secara objektif:
 
 - **HP A (meja)** diletakkan di meja dengan layar menghadap ke atas. HP ini mengukur cahaya meja dan getaran meja saat kamu menulis atau mengetik.
-- **HP B (pribadi)** ditelungkupkan di meja selama sesi. Kalau HP ini diangkat, HP B bergetar dan menegur.
-- **Laptop** menggabungkan data kedua HP menjadi skor fokus 0–100, menjalankan timer Pomodoro, dan menampilkan dashboard.
+- **HP B (pribadi)** ditelungkupkan di meja selama sesi dan berfungsi sebagai saklar Pomodoro. Kalau HP ini diangkat, HP B menegur.
+- **Laptop** menggabungkan data kedua HP menjadi skor fokus 0–100, menjalankan Pomodoro adaptif, dan menampilkan dashboard.
 
 ## Cara kerja
 
@@ -49,7 +60,7 @@ cp .env.example .env
 
 *Di Windows PowerShell, gunakan `Copy-Item .env.example .env`.*
 
-Ganti `PROJECT_ID` di `.env` menjadi nama kelompok yang unik, misalnya `focusdesk_kelompok_07`. Default memakai broker publik HiveMQ (tanpa akun, **jangan kirim data rahasia**).
+Ganti `PROJECT_ID` di `.env` menjadi nama kelompok yang unik, misalnya `focusdesk_kelompok05`. Default memakai broker publik HiveMQ (tanpa akun, **jangan kirim data rahasia**).
 
 ```bash
 python detector.py
@@ -83,11 +94,13 @@ HP A tetap harus Android karena butuh sensor cahaya.
 
 ## 3. Coba sistemnya
 
-1. Di dashboard, tekan **START**. Timer mulai berjalan.
+1. Telungkupkan HP B. Setelah 3 detik pomodoro mulai sendiri (tombol **START** juga bisa dipakai).
 2. Menulislah di kertas atau mengetik. Status harus `FOKUS`.
-3. Angkat HP B. Status berubah menjadi `TERDISTRAKSI` dan HP B bergetar.
-4. Matikan lampu. Setelah 30 detik status menjadi `CAHAYA_KURANG` dan HP A bersuara.
-5. Tekan **STOP**. HP A membacakan ringkasan sesi.
+3. Angkat HP B sebentar. Status berubah menjadi `TERDISTRAKSI` dan HP B menegur.
+4. Bawa HP B pergi lebih lama dari `AWAY_SECONDS`. Status menjadi `DITINGGAL` dan timer berhenti. Telungkupkan lagi untuk melanjutkan.
+5. Matikan lampu. Setelah 30 detik status menjadi `CAHAYA_KURANG` dan HP A bersuara.
+6. Tunggu pomodoro selesai. HP A mengumumkan skornya dan lama istirahat yang sudah disesuaikan.
+7. Tekan **STOP**. HP A membacakan ringkasan sesi.
 
 Untuk video demo, perpendek timer di `.env` (misalnya `FOCUS_MINUTES=3`, `BREAK_MINUTES=1`).
 
