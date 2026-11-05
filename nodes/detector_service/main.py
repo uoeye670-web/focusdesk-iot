@@ -15,6 +15,7 @@ import json
 import threading
 import time
 
+from nodes.detector_service.learner import learner_from_env
 from nodes.detector_service.rules import Alert, FocusConfig, FocusDetector
 from shared.messages import alert_json, parse_telemetry
 from shared.mqtt_connection import create_client, topic
@@ -25,7 +26,7 @@ def now_ms() -> int:
 
 
 def main():
-    detector = FocusDetector(FocusConfig.from_env())
+    detector = FocusDetector(FocusConfig.from_env(), learner_from_env())
     lock = threading.Lock()  # MQTT callbacks and the 1-second clock share the detector
     status_topic = topic("status")
     offline = json.dumps({"status": "OFFLINE", "reason": "Detector disconnected"})

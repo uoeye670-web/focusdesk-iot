@@ -94,6 +94,23 @@ IDLE ──(HP B telungkup ≥ 3 dtk, atau START)──► FOCUS ──(timer ha
 - Setelah `STOP`, HP B harus diangkat sekali dulu sebelum menelungkupkannya bisa memulai sesi baru, supaya STOP tidak langsung dibatalkan oleh HP yang masih tertelungkup.
 - `PAUSE` manual membekukan timer sampai `START` ditekan lagi, dan `STOP` mengakhiri sesi lalu HP A membacakan ringkasan.
 
+### Machine learning: durasi personal
+
+`nodes/detector_service/learner.py` memakai **contextual multi-armed bandit dengan Thompson Sampling**.
+
+| Istilah | Di FocusDesk |
+|---|---|
+| Arm (pilihan) | Durasi fokus dari `FOCUS_OPTIONS`, default 15, 25, 35, 45 menit |
+| Konteks | Kesulitan materi: mudah, sedang, sulit |
+| Reward | `(50% nilai pengguna + 50% skor sensor) × √(durasi ÷ durasi terlama)` |
+
+- **Akar durasi:** orang lebih mudah fokus 15 menit daripada 45 menit, jadi tanpa ini model selalu memilih yang terpendek. Bonusnya mengecil, sehingga sesi panjang tetap harus menjaga kualitas.
+- **Awal:** setiap durasi dicoba sekali. Setelah itu model mengambil sampel dari keyakinan tiap durasi dan memilih yang tertinggi, sehingga durasi yang masih belum pasti tetap sesekali dicoba.
+- **Data sedikit:** keyakinan awal suatu kesulitan berasal dari semua sesi pada durasi yang sama, lalu sesi kesulitan itu sendiri mengambil alih. Sesi baru berbobot lebih besar daripada sesi lama.
+- **Sesi yang tidak dipakai:** sesi yang dihentikan dengan `STOP` dan sesi yang dijeda lebih dari 25% durasinya. Kalau nilai dilewati, hanya skor sensor yang dipakai.
+- **Data:** riwayat tiap pengguna tersimpan di `data/<USER_PROFILE>.jsonl` dan tidak masuk git. `LEARN_DURATION=false` mematikan model, dan timer kembali memakai `FOCUS_MINUTES`.
+- **Keterbatasan:** satu sesi hanya menghasilkan satu data, jadi rekomendasi butuh puluhan sesi untuk stabil. Hasilnya juga dipengaruhi faktor yang tidak diukur, seperti jam belajar dan rasa lelah.
+
 ### Keamanan sederhana
 
 Seperti contoh proyek aslinya, detector menolak:
@@ -109,7 +126,7 @@ focusdesk/<PROJECT_ID>/edge/edge2/telemetry   HP B -> broker
 focusdesk/<PROJECT_ID>/status                 laptop -> dashboard (retained, tiap detik)
 focusdesk/<PROJECT_ID>/alerts/edge1           laptop -> HP A (suara)
 focusdesk/<PROJECT_ID>/alerts/edge2           laptop -> HP B (getar)
-focusdesk/<PROJECT_ID>/control                dashboard -> laptop (START / PAUSE / STOP)
+focusdesk/<PROJECT_ID>/control                dashboard -> laptop (START, PAUSE, STOP, DIFFICULTY <tingkat>, RATE <1-5 atau SKIP>)
 ```
 
 ## Contoh payload

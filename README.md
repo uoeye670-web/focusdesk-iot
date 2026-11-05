@@ -11,6 +11,7 @@ Dasar programnya teknik Pomodoro (25 menit fokus, 5 menit istirahat, istirahat p
 | **Mulai sendiri** | HP B ditelungkupkan ≥ 3 detik, pomodoro langsung berjalan tanpa menekan START |
 | **Jeda sendiri** | HP B tidak telungkup ≥ `AWAY_SECONDS` (60 detik), pengguna dianggap meninggalkan meja dan timer dijeda. Telungkupkan lagi untuk melanjutkan |
 | **Istirahat adaptif** | Skor fokus rata-rata tiap pomodoro menentukan istirahat: ≥ 80 normal, 60–79 × 1,4, < 60 × 1,8 |
+| **Durasi personal (machine learning)** | Pengguna memilih kesulitan materi dan memberi nilai 1–5 setelah sesi. Contextual Thompson Sampling mempelajari durasi fokus terbaik (`FOCUS_OPTIONS`) untuk tiap orang |
 | **Laporan per pomodoro** | Skor, jumlah HP diambil, dan lama istirahat untuk setiap pomodoro tampil di dashboard |
 
 ## Masalah & ide
@@ -94,12 +95,12 @@ HP A tetap harus Android karena butuh sensor cahaya.
 
 ## 3. Coba sistemnya
 
-1. Telungkupkan HP B. Setelah 3 detik pomodoro mulai sendiri (tombol **START** juga bisa dipakai).
+1. Pilih kesulitan materi di dashboard, lalu telungkupkan HP B. Setelah 3 detik pomodoro mulai sendiri dengan durasi pilihan model (tombol **START** juga bisa dipakai).
 2. Menulislah di kertas atau mengetik. Status harus `FOKUS`.
 3. Angkat HP B sebentar. Status berubah menjadi `TERDISTRAKSI` dan HP B menegur.
 4. Bawa HP B pergi lebih lama dari `AWAY_SECONDS`. Status menjadi `DITINGGAL` dan timer berhenti. Telungkupkan lagi untuk melanjutkan.
 5. Matikan lampu. Setelah 30 detik status menjadi `CAHAYA_KURANG` dan HP A bersuara.
-6. Tunggu pomodoro selesai. HP A mengumumkan skornya dan lama istirahat yang sudah disesuaikan.
+6. Tunggu pomodoro selesai. HP A mengumumkan skornya dan lama istirahat yang sudah disesuaikan. Beri nilai 1–5 di dashboard untuk melatih model.
 7. Tekan **STOP**. HP A membacakan ringkasan sesi.
 
 Untuk video demo, perpendek timer di `.env` (misalnya `FOCUS_MINUTES=3`, `BREAK_MINUTES=1`).
@@ -140,7 +141,8 @@ python -m scripts.kalibrasi_meja
 - `shared/sensors.py`: membaca sensor lewat Termux:API (atau simulator)
 - `shared/processing.py`: 4 data processing di edge
 - `shared/messages.py`: format JSON telemetry dan alert
-- `nodes/detector_service/rules.py`: algoritma skor fokus + Pomodoro
+- `nodes/detector_service/rules.py`: algoritma skor fokus + Pomodoro adaptif
+- `nodes/detector_service/learner.py`: machine learning pemilih durasi fokus
 - `shared/alarm.py`: suara (HP A) dan getar/notifikasi (HP B)
 - `dashboard/index.html`: dashboard web lewat MQTT over WebSocket
 - `web/hp-pribadi.html`: HP B versi browser (iPhone), di-host lewat GitHub Pages

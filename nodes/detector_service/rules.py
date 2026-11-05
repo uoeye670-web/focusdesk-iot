@@ -3,8 +3,9 @@
 Adaptive Pomodoro driven by sensor fusion of two edges:
   - flipping HP B face down starts (or resumes) a focus session by itself,
   - taking HP B away for longer than AWAY_SECONDS pauses the timer by itself,
-  - the focus score of each finished pomodoro sets how long the next break is.
-Make changes here when experimenting with thresholds or a new AI model.
+  - the focus score of each finished pomodoro sets how long the next break is,
+  - a learning model (learner.py) picks how long each focus session should be.
+Make changes here when experimenting with thresholds.
 Time always comes in as `now_ms`, so tests can replay a whole session instantly.
 """
 
@@ -12,6 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 import os
 
+from nodes.detector_service.learner import DEFAULT_DIFFICULTY, DIFFICULTIES, DurationLearner, SessionRecord
 from shared.messages import DeskTelemetry, PhoneTelemetry, Telemetry
 
 WEIGHT_PHONE = 0.45
@@ -22,6 +24,9 @@ WEIGHT_LIGHT = 0.20
 # A distracted pomodoro is a sign of fatigue, so the following break is longer.
 ADAPTIVE_BREAK = ((80, 1.0), (60, 1.4), (0, 1.8))
 HISTORY_LENGTH = 12
+# A session paused longer than this share of its length says little about its duration,
+# so the model does not learn from it.
+MAX_PAUSED_SHARE = 0.25
 
 
 @dataclass(frozen=True)
@@ -119,8 +124,13 @@ def clock(seconds: float) -> str:
 
 
 class FocusDetector:
-    def __init__(self, config: FocusConfig | None = None):
+    def __init__(self, config: FocusConfig | None = None, learner: DurationLearner | None = None):
         self.config = config or FocusConfig()
+        self.learner = learner
+        self.difficulty = DEFAULT_DIFFICULTY
+        self.focus_difficulty = DEFAULT_DIFFICULTY
+        self.current_focus_minutes = self.config.focus_minutes
+        self.pending_session: dict | None = None  # finished, waiting for the user's rating
         self.desk: DeskTelemetry | None = None
         self.phone: PhoneTelemetry | None = None
         self.seen_ms: dict[str, int] = {}
@@ -160,6 +170,7 @@ class FocusDetector:
         self.pomodoro_score_sum = 0.0
         self.pomodoro_score_count = 0
         self.pomodoro_start_pickups = self.pickups
+        self.pomodoro_paused_seconds = 0.0
 
     def _phone_down(self) -> bool:
         return self.phone is not None and self.phone.face_down and self.phone.held_ratio < 0.5
@@ -200,6 +211,13 @@ class FocusDetector:
 
     def control(self, command: str, now_ms: int) -> list[Alert]:
         command = command.strip().upper()
+        parts = command.split()
+        if len(parts) == 2 and parts[0] == "DIFFICULTY":
+            self._set_difficulty(parts[1].lower())
+            return []
+        if len(parts) == 2 and parts[0] == "RATE":
+            self._rate(parts[1], now_ms)
+            return []
         if command not in ("START", "PAUSE", "STOP"):
             raise ValueError(f"Unknown control command: {command[:40]}")
         alerts = []
@@ -214,6 +232,7 @@ class FocusDetector:
             self.phase = "IDLE"
             self.auto_paused = False
             self.auto_start_armed = False
+            self._save_pending(None, now_ms)
             summary = self.summary()
             alerts.append(Alert("edge1", "SESSION_SUMMARY",
                                 f"Sesi selesai. {summary['pomodoros']} pomodoro, fokus {summary['focus_minutes']:g} menit, "
@@ -226,9 +245,42 @@ class FocusDetector:
         self._reset_session(now_ms)
         self.phase, self.cycle = "FOCUS", 1
         self.completed_pomodoros, self.long_break, self.auto_paused = 0, False, False
-        self._set_phase_length(self.config.focus_minutes * 60)
+        self._begin_focus(now_ms)
         how = "HP sudah ditelungkupkan. " if automatic else ""
-        return Alert("edge1", "SESSION_START", f"{how}Pomodoro 1 dimulai, {self.config.focus_minutes:g} menit.")
+        # With the model on the length stays unspoken, so it cannot sway the user's rating.
+        length = "" if self.learner else f", {duration_text(self.current_focus_minutes)}"
+        return Alert("edge1", "SESSION_START", f"{how}Pomodoro 1 dimulai{length}.")
+
+    def _begin_focus(self, now_ms: int):
+        self._save_pending(None, now_ms)  # the question went unanswered: keep the sensor score only
+        self.focus_difficulty = self.difficulty
+        self.current_focus_minutes = (self.learner.choose(self.difficulty) if self.learner
+                                      else self.config.focus_minutes)
+        self._set_phase_length(self.current_focus_minutes * 60)
+
+    def _set_difficulty(self, difficulty: str):
+        if difficulty not in DIFFICULTIES:
+            raise ValueError(f"Unknown difficulty: {difficulty[:40]}")
+        self.difficulty = difficulty
+
+    def _rate(self, value: str, now_ms: int):
+        if value == "SKIP":
+            return self._save_pending(None, now_ms)
+        if value not in ("1", "2", "3", "4", "5"):
+            raise ValueError(f"Rating must be 1-5 or SKIP: {value[:40]}")
+        self._save_pending(int(value), now_ms)
+
+    def _save_pending(self, rating: int | None, now_ms: int):
+        """Teach the model from the finished session, once, unless it was paused too long."""
+        pending, self.pending_session = self.pending_session, None
+        if pending is None:
+            return
+        for item in self.history:
+            if item["number"] == pending["number"]:
+                item["rating"] = rating
+        if self.learner and pending["counted"]:
+            self.learner.add(SessionRecord(pending["difficulty"], pending["minutes"],
+                                           pending["score"], rating, now_ms))
 
     def _resume(self, message: str) -> Alert:
         self.phase, self.auto_paused = self.paused_from, False
@@ -246,6 +298,8 @@ class FocusDetector:
         alerts: list[Alert] = []
 
         self._automatic_start_pause(now_ms, alerts)
+        if self.phase == "PAUSED" and self.paused_from == "FOCUS":
+            self.pomodoro_paused_seconds += dt
         if self.phase in ("FOCUS", "BREAK"):
             self.phase_left_s -= dt
             if self.phase_left_s <= 0 and self.phase == "FOCUS":
@@ -253,7 +307,7 @@ class FocusDetector:
             elif self.phase_left_s <= 0:
                 self.phase, self.cycle = "FOCUS", self.cycle + 1
                 self.long_break = False
-                self._set_phase_length(self.config.focus_minutes * 60)
+                self._begin_focus(now_ms)
                 self.last_desk_active_ms = now_ms
                 self._reset_pomodoro()
                 alerts.append(Alert("edge1", "FOCUS",
@@ -285,15 +339,27 @@ class FocusDetector:
         score = (round(self.pomodoro_score_sum / self.pomodoro_score_count, 1)
                  if self.pomodoro_score_count else None)
         factor = break_multiplier(score) if self.config.adaptive_break else 1.0
-        base = self.config.long_break_minutes if self.long_break else self.config.break_minutes
+        minutes = self.current_focus_minutes
+        # A short break keeps the same share of the focus time as the configured pair.
+        base = (self.config.long_break_minutes if self.long_break
+                else self.config.break_minutes * minutes / self.config.focus_minutes)
         break_minutes = round(base * factor, 2)
+        counted = self.pomodoro_paused_seconds <= MAX_PAUSED_SHARE * minutes * 60
         self.history.append({
             "number": self.cycle,
             "score": score,
             "pickups": self.pickups - self.pomodoro_start_pickups,
             "break_minutes": break_minutes,
             "long_break": self.long_break,
+            "focus_minutes": minutes,
+            "difficulty": self.focus_difficulty,
+            "rating": None,
+            "counted": counted,
         })
+        self.pending_session = {
+            "number": self.cycle, "difficulty": self.focus_difficulty,
+            "minutes": minutes, "score": score, "counted": counted,
+        }
         del self.history[:-HISTORY_LENGTH]
         self.phase = "BREAK"
         self._set_phase_length(break_minutes * 60)
@@ -423,6 +489,11 @@ class FocusDetector:
                 "adaptive_break": self.config.adaptive_break,
             },
             "history": self.history,
+            "current_focus_minutes": self.current_focus_minutes,
+            "learning": None if self.learner is None else {
+                **self.learner.report(self.difficulty),
+                "pending": self.pending_session,
+            },
             "focus_score": self.current_score() if self.phase == "FOCUS" else None,
             "session": self.summary(),
             "desk": None if desk is None else {

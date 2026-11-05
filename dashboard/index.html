@@ -83,6 +83,33 @@
   .pomo-card.low .score { color: var(--bad); } .pomo-card.low .meter > div { background: var(--bad); }
   .pomo-card .kv { font-size: 12px; }
   #auto-hint { color: var(--muted); text-align: center; }
+  [hidden] { display: none !important; }
+  /* rating panel */
+  .rate { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px;
+          border-color: var(--state); box-shadow: 0 0 40px -14px var(--state); }
+  .rate h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 2px 0; }
+  .rate h2 em { font-family: var(--serif); font-weight: 400; font-size: 1.2em; color: var(--state); }
+  .rate-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .rate-buttons button { width: 52px; height: 52px; padding: 0; font: 700 20px var(--mono); }
+  .rate-buttons button:hover { background: var(--text); color: #0b0f17; }
+  .rate-buttons .rate-skip { width: auto; height: 40px; padding: 0 16px; font: 700 13px var(--font); color: var(--muted); }
+  /* machine learning */
+  .ml-grid { display: grid; gap: 20px; grid-template-columns: minmax(240px, 2fr) 3fr; }
+  @media (max-width: 760px) { .ml-grid { grid-template-columns: 1fr; } }
+  .ml-side { display: grid; gap: 16px; align-content: start; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .chips button { padding: 8px 16px; }
+  .chips button.active { background: var(--text); color: #0b0f17; border-color: var(--text); }
+  .chips button.active:hover { background: var(--text); }
+  .check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; font-weight: 500; }
+  .check input { width: 16px; height: 16px; flex: none; margin-top: 2px; accent-color: var(--ok); }
+  .ml-bars { display: grid; gap: 10px; align-content: center; }
+  .ml-bar { display: grid; grid-template-columns: 58px 1fr 104px; gap: 10px; align-items: center; font: 500 12px var(--mono); color: var(--muted); }
+  .ml-bar b { color: var(--text); font-size: 14px; }
+  .ml-bar .meter { height: 12px; border-radius: 6px; }
+  .ml-bar .meter > div { background: rgba(255,255,255,0.28); border-radius: 6px; }
+  .ml-bar.best .meter > div { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .ml-bar.empty .meter > div { background: rgba(255,255,255,0.1); }
   @media (max-width: 980px) {
     .w-timer, .w-status, .w-half, .w-chart, .w-alerts { grid-column: span 12; }
     .w-score { grid-column: span 6; } .w-small { grid-column: span 3; }
@@ -219,6 +246,23 @@
     <span id="clock">--:--:--</span>
   </header>
 
+  <!-- rating, shown once when a pomodoro ends -->
+  <section class="glass rate" id="rate-panel" hidden aria-labelledby="rate-title">
+    <div>
+      <span class="micro" id="rate-context">Pomodoro selesai</span>
+      <h2 id="rate-title">Seberapa <em>produktif</em> sesi tadi?</h2>
+      <p class="muted">1 = hampir tidak belajar · 3 = cukup · 5 = sangat produktif. Nilai ini melatih model durasi.</p>
+    </div>
+    <div class="rate-buttons">
+      <button type="button" data-rate="1">1</button>
+      <button type="button" data-rate="2">2</button>
+      <button type="button" data-rate="3">3</button>
+      <button type="button" data-rate="4">4</button>
+      <button type="button" data-rate="5">5</button>
+      <button type="button" class="rate-skip" data-rate="SKIP">Lewati</button>
+    </div>
+  </section>
+
   <section class="bento" aria-label="Dashboard FocusDesk">
     <!-- timer -->
     <div class="glass w-timer">
@@ -323,6 +367,30 @@
       <span class="micro" id="edge2-seen"> </span>
     </div>
 
+    <!-- machine learning: best focus duration -->
+    <div class="glass w-full ml" id="ml-card" hidden>
+      <div class="w-head"><h2>Durasi personal</h2><span class="micro">Machine learning · contextual Thompson Sampling</span></div>
+      <div class="ml-grid">
+        <div class="ml-side">
+          <div>
+            <span class="micro">Kesulitan materi · berlaku untuk sesi berikutnya</span>
+            <div class="chips" id="difficulty-chips">
+              <button type="button" data-difficulty="MUDAH">Mudah</button>
+              <button type="button" data-difficulty="SEDANG">Sedang</button>
+              <button type="button" data-difficulty="SULIT">Sulit</button>
+            </div>
+          </div>
+          <div>
+            <span class="micro">Durasi terbaik saat ini</span>
+            <div class="big" id="ml-best">—</div>
+            <p class="muted" id="ml-note">Belum ada data. Model akan mencoba setiap durasi dulu.</p>
+          </div>
+          <label class="check"><input type="checkbox" id="hide-timer"> Sembunyikan timer selama fokus, supaya penilaian tidak terpengaruh durasi</label>
+        </div>
+        <div class="ml-bars" id="ml-bars" aria-label="Perkiraan model untuk setiap durasi"></div>
+      </div>
+    </div>
+
     <!-- per-pomodoro report -->
     <div class="glass w-full">
       <div class="w-head"><h2>Laporan per pomodoro</h2><span class="micro">istirahat adaptif: skor &lt; 80 → ×1,4 · skor &lt; 60 → ×1,8</span></div>
@@ -384,6 +452,8 @@ const $ = (id) => document.getElementById(id);
 let client = null;
 let base = "";
 let lastPhase = "IDLE";
+let lastData = null;
+let hideTimer = false;
 const scores = [];
 const deskHistory = [];
 const alerts = [];
@@ -482,6 +552,7 @@ function disconnect() {
 
 function setButtons(connected) {
   for (const id of ["disconnect-btn", "start-btn", "pause-btn", "stop-btn"]) $(id).disabled = !connected;
+  document.querySelectorAll("#difficulty-chips button, #rate-panel button").forEach((button) => { button.disabled = !connected; });
 }
 
 function sendControl(command) {
@@ -509,20 +580,25 @@ function renderStatus(data) {
   const phase = String(data.phase || "IDLE");
   const config = data.config || {};
   const left = Number(data.phase_left_s) || 0;
-  $("timer").textContent = phase === "IDLE" ? "--:--" : mmss(left);
+  lastData = data;
+  const learning = data.learning || null;
+  const focusing = phase === "FOCUS" || (phase === "PAUSED" && data.auto && data.auto.paused);
+  const hideNow = hideTimer && Boolean(learning) && focusing;
+  $("timer").textContent = phase === "IDLE" ? "--:--" : hideNow ? "••:••" : mmss(left);
   const pomodoro = data.pomodoro || {};
   const longBreak = phase === "BREAK" && Boolean(pomodoro.long_break);
   $("phase").textContent = phase === "BREAK" ? (longBreak ? "Istirahat panjang" : "Istirahat singkat") : (PHASE_TEXT[phase] || phase);
   if (status === "ISTIRAHAT" && longBreak) $("status-text").lastChild.textContent = "istirahat panjang";
   renderPomodoros(phase, pomodoro);
-  $("plan-label").textContent = config.focus_minutes
-    ? `${config.focus_minutes}m fokus · ${config.break_minutes}m · ${config.long_break_minutes}m panjang`
-    : "Fokus — · Istirahat —";
-  $("left-label").textContent = phase === "IDLE" ? "Sisa —" : `Sisa ${Math.ceil(left / 60)}m`;
+  const focusText = learning ? (phase === "IDLE" ? "Durasi dari model" : hideNow ? "Durasi disembunyikan" : `${data.current_focus_minutes}m fokus`)
+    : `${config.focus_minutes}m fokus · ${config.break_minutes}m`;
+  $("plan-label").textContent = config.focus_minutes ? `${focusText} · ${config.long_break_minutes}m panjang` : "Fokus — · Istirahat —";
+  $("left-label").textContent = phase === "IDLE" || hideNow ? "Sisa —" : `Sisa ${Math.ceil(left / 60)}m`;
   $("start-btn").textContent = phase === "PAUSED" ? "LANJUT" : "START";
-  renderRing(phase, left, config, longBreak, data.phase_total_s);
-  renderAuto(phase, data.auto || {}, Number(data.phase_total_s) || 0, config, longBreak);
-  renderHistory(Array.isArray(data.history) ? data.history : []);
+  renderRing(hideNow ? "IDLE" : phase, left, config, longBreak, data.phase_total_s);
+  renderAuto(phase, data.auto || {}, Number(data.phase_total_s) || 0, config, longBreak, data);
+  renderHistory(Array.isArray(data.history) ? data.history : [], learning);
+  renderLearning(learning);
 
   const score = typeof data.focus_score === "number" ? data.focus_score : null;
   $("score").textContent = score === null ? "—" : Math.round(score);
@@ -539,6 +615,43 @@ function renderStatus(data) {
   renderDesk(data.desk, config);
   renderPhone(data.phone);
   renderSummary(data.session || {});
+}
+
+function renderLearning(learning) {
+  $("ml-card").hidden = !learning;
+  $("rate-panel").hidden = !(learning && learning.pending);
+  if (!learning) return;
+
+  if (learning.pending) {
+    const counted = learning.pending.counted;
+    $("rate-context").textContent = `Pomodoro #${learning.pending.number} selesai` + (counted ? "" : " · terlalu lama dijeda, tidak dipakai melatih model");
+  }
+  document.querySelectorAll("#difficulty-chips button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.difficulty.toLowerCase() === learning.difficulty);
+  });
+
+  const best = learning.best_minutes;
+  $("ml-best").replaceChildren(document.createTextNode(best === null ? "—" : best), Object.assign(document.createElement("small"), { textContent: best === null ? "" : "menit" }));
+  $("ml-note").textContent = learning.sessions
+    ? `Materi ${learning.difficulty}: ${learning.sessions} sesi, keyakinan ${learning.confidence}. Total ${learning.total_sessions} sesi.`
+    : `Belum ada sesi untuk materi ${learning.difficulty}. Total ${learning.total_sessions} sesi. Model akan terus mencoba durasi berbeda.`;
+
+  const box = $("ml-bars");
+  const key = JSON.stringify([learning.durations, best]);
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.replaceChildren(...learning.durations.map((item) => {
+    const row = document.createElement("div");
+    row.className = `ml-bar${item.minutes === best ? " best" : ""}${item.sessions ? "" : " empty"}`;
+    const label = document.createElement("span");
+    label.appendChild(Object.assign(document.createElement("b"), { textContent: `${item.minutes}m` }));
+    const meter = document.createElement("div");
+    meter.className = "meter";
+    meter.appendChild(Object.assign(document.createElement("div"), { style: `width:${Math.round(item.reward * 100)}%` }));
+    const detail = item.avg_rating === null ? `${item.sessions} sesi` : `${item.sessions} sesi · ${item.avg_rating}/5`;
+    row.append(label, meter, Object.assign(document.createElement("span"), { textContent: detail }));
+    return row;
+  }));
 }
 
 function renderPomodoros(phase, pomodoro) {
@@ -568,23 +681,26 @@ function renderRing(phase, leftSeconds, config, longBreak, phaseTotal) {
   [...$("ticks").children].forEach((tick, i) => tick.classList.toggle("lit", i < lit));
 }
 
-function renderAuto(phase, auto, phaseTotal, config, longBreak) {
+function renderAuto(phase, auto, phaseTotal, config, longBreak, data) {
   let hint = "";
   if (phase === "IDLE") hint = auto.start_armed === false ? "Angkat lalu telungkupkan HP B untuk sesi baru" : "Telungkupkan HP B untuk mulai otomatis";
   else if (phase === "FOCUS") hint = `Bawa HP B pergi > ${auto.away_seconds || 60} dtk = jeda otomatis`;
   else if (phase === "PAUSED") hint = auto.paused ? "Telungkupkan HP B untuk melanjutkan" : "Tekan LANJUT untuk melanjutkan";
   else if (phase === "BREAK") {
-    const base = ((longBreak ? config.long_break_minutes : config.break_minutes) || 0) * 60;
+    const focusMinutes = Number(data.current_focus_minutes) || config.focus_minutes || 1;
+    const shortBase = (config.break_minutes || 0) * focusMinutes / (config.focus_minutes || focusMinutes);
+    const base = (longBreak ? config.long_break_minutes || 0 : shortBase) * 60;
     hint = base && phaseTotal > base + 1 ? `Istirahat diperpanjang ×${(phaseTotal / base).toFixed(1)} (skor rendah)` : "Istirahat normal (skor bagus)";
   }
   $("auto-hint").textContent = hint;
 }
 
-function renderHistory(history) {
+function renderHistory(history, learning) {
   const box = $("history");
   if (history.length === 0) return;
-  const key = JSON.stringify(history);
-  if (box.dataset.key === key) return;  // hanya gambar ulang saat ada pomodoro baru
+  const pendingNumber = learning && learning.pending ? learning.pending.number : null;
+  const key = JSON.stringify([history, pendingNumber, hideTimer]);
+  if (box.dataset.key === key) return;  // hanya gambar ulang saat ada perubahan
   box.dataset.key = key;
   box.replaceChildren(...history.map((item) => {
     const score = typeof item.score === "number" ? item.score : null;
@@ -605,6 +721,18 @@ function renderHistory(history) {
     rest.append(item.long_break ? "Istirahat panjang" : "Istirahat",
                 Object.assign(document.createElement("b"), { textContent: `${item.break_minutes} mnt` }));
     card.append(top, meter, pickups, rest);
+    if (learning) {
+      // Durasi baru diperlihatkan setelah dinilai kalau timer disembunyikan.
+      const waiting = item.number === pendingNumber;
+      const focus = document.createElement("div");
+      focus.className = "kv";
+      focus.append(`Fokus · ${item.difficulty}`, Object.assign(document.createElement("b"), { textContent: waiting && hideTimer ? "—" : `${item.focus_minutes} mnt` }));
+      const rating = document.createElement("div");
+      rating.className = "kv";
+      const ratingText = waiting ? "belum dinilai" : item.rating === null ? "dilewati" : `${item.rating}/5`;
+      rating.append(item.counted ? "Nilai" : "Nilai (tidak dilatih)", Object.assign(document.createElement("b"), { textContent: ratingText }));
+      card.append(focus, rating);
+    }
     return card;
   }));
 }
@@ -757,6 +885,22 @@ $("disconnect-btn").addEventListener("click", disconnect);
 $("start-btn").addEventListener("click", () => sendControl("START"));
 $("pause-btn").addEventListener("click", () => sendControl("PAUSE"));
 $("stop-btn").addEventListener("click", () => sendControl("STOP"));
+document.querySelectorAll("#difficulty-chips button").forEach((button) => {
+  button.addEventListener("click", () => sendControl(`DIFFICULTY ${button.dataset.difficulty}`));
+});
+document.querySelectorAll("#rate-panel button").forEach((button) => {
+  button.addEventListener("click", () => {
+    sendControl(`RATE ${button.dataset.rate}`);
+    $("rate-panel").hidden = true;
+  });
+});
+try { hideTimer = localStorage.getItem("focusdesk-hide-timer") === "1"; } catch (e) { /* abaikan */ }
+$("hide-timer").checked = hideTimer;
+$("hide-timer").addEventListener("change", (event) => {
+  hideTimer = event.target.checked;
+  try { localStorage.setItem("focusdesk-hide-timer", hideTimer ? "1" : "0"); } catch (e) { /* abaikan */ }
+  if (lastData) renderStatus(lastData);
+});
 window.addEventListener("resize", drawChart);
 loadSettings();
 
